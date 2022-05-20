@@ -1,0 +1,12 @@
+---
+title: "Epidemiological Report - COVID-19"
+author: "Hugo Soubrier"
+date: "5/19/2022"
+output: 
+  html_document:
+    toc: true
+---
+
+#1. need to load library
+#2. need to load data 
+#3. 
