@@ -8,10 +8,14 @@ output:
 ---
 # Do the set - up of the document data libraries 
 ```{r library loading, include = F}
+#spatial analysis 
 library(shiny)
 library(sf)
+library(ggsn)
 library(raster)
 library(leaflet)
+
+#epidemiological analysis 
 library(shinyWidgets)
 library(skimr)
 library(epikit)
@@ -302,23 +306,55 @@ hist(clean_data$latitude_JITT)
 #only keep cases which are found within the vector dataset - perform a spatial filter
 clean_data_sf <- st_filter(clean_data_sf, vector)
 
-
-
 ```
+
+<center>
+
+Cases have been detected throughout Fulton county, especially in major cities. The South-West part of the County
 
 
 ```{r cases map, message = F, echo = F}
 
 #display map of cases to identify potentially undersampled locations - not the case here 
 
+ggplot() +
+  
+  geom_sf(data = vector, fill = "#ffffff", col = "black", size = .2) +
+  geom_sf(data = clean_data_sf, col = "#F8D18D", size = .1, alpha = .2) +
+  
+  ggtitle("Map of detected cases within Fulton county")+
+  
+  theme(plot.margin = unit(c(2, 2, 2, 2), "mm"), 
+        panel.background = element_blank(), 
+        legend.background=element_blank(),
+        axis.line = element_blank(), 
+        axis.title = element_blank(), 
+        axis.ticks = element_blank(), 
+        axis.text = element_blank(), 
+        plot.title = element_text(size = 13, 
+                                  color = "#34495E", 
+                                  hjust = 0, 
+                                  vjust = 0)) +
+  ggsn::scalebar(data=vector, dist= 15, dist_unit = "km", 
+           transform=T, 
+           model="WGS84", 
+           border.size = .2, 
+           st.size = 2, 
+           height = .01, 
+           location= "bottomleft", 
+           anchor = c(x=-84.4, y =33.5 )
+           ) + 
+    
+    ggsn::north(data=vector, 
+          symbol = 14, 
+          scale= .08, 
+          location= "topleft")  
+  
+ 
 
-
-
-
-
-
-
-
+```
+</center>
+```{r}
 
 #join spatial data and epi data 
 clean_data_sf <- left_join(clean_data, vector, by = c("case_zip" = "ZipCode"))
@@ -333,7 +369,6 @@ clean_data_sf %>% group_by(weeks = floor_date(pos_sampledt_FALSE, "week",
   count(.drop = F) %>% 
   
   mutate(AR = round(digits = 2, n/Population * 10000))
-
 
 
 
