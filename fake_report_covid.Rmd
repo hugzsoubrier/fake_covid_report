@@ -1,12 +1,288 @@
 ---
 title: "Epidemiological Report - COVID-19"
 author: "Hugo Soubrier"
-date: "5/19/2022"
+date: "``r Sys.Date()``"
 output: 
   html_document:
     toc: true
 ---
+# Do the set - up of the document data libraries 
+```{r library loading, include = F}
+library(shiny)
+library(shinyWidgets)
+library(skimr)
+library(epikit)
+library(incidence)
+library(linelist)
+library(magrittr)
+library(utils)
+library(lubridate)
+library(aweek)
+library(naniar)
+library(ggplot2)
+library(devtools)
+library(plotly)
+library(shinydashboard)
+library(shinyjs)
+library(janitor)
+library(lubridate)
+library(sunburstR)
+library(knitr)
+library(kableExtra)
+library(rio)
+library(here)
+library(tidyselect)
+library(tidyverse)
+library(highcharter)
+```
 
-#1. need to load library
+```{r data loading & cleaning, echo = F, eval = T, message = F}
+#read data
+data <- import(here("data", "covid_example_data.xlsx"))
+
+# set data classes -----------------------------------
+
+#create vector for the factors variables
+fct_vars <- data %>% select(contains("sym"), #select all symptoms var
+                            -sym_startdt_FALSE, #exclude the symptoms date var 
+                            - sym_resolveddt_FALSE, #exclude the symptoms resolved date var 
+                            case_gender, 
+                            case_race, 
+                            case_eth, 
+                            hospitalized, 
+                            died, 
+                            died_covid, 
+                            confirmed_case, 
+                            covid_dx) %>% names()
+
+#create vector for the date variables
+date_vars <- data %>% select(case_dob_FALSE, contains("dt")) %>% names()
+
+#create vector for numeric variables
+numeric_vars <- data %>% select(case_age, latitude_JITT, longitude_JITT) %>% names()
+
+#create vector for character variables
+character_vars <- data %>% select(PID) %>% names()
+
+
+#apply data class to each vectors -
+clean_data <- data %>% mutate(across(fct_vars, as_factor),
+                across(date_vars, as_date), 
+                across(numeric_vars, as.numeric), 
+                across(character_vars, as.character))
+
+# Tidy data -------------------
+#create vector of var that need cleaning 
+needtidy_vars <- clean_data %>% select(where(is.factor)) %>% colnames()
+
+# use linelist::clean_data on it 
+clean_data[needtidy_vars] <- clean_data %>% select(all_of(needtidy_vars)) %>% clean_data()
+
+```
+
+```{r data recoding & classifying, include = F}
+# create age_cat var 
+clean_data <- clean_data %>%  mutate(age_cat = case_when( case_age < 10 ~ "< 10", 
+                                                between(case_age, 10, 20) ~ "10 - 20", 
+                                                between(case_age, 20, 30) ~ "20 - 30", 
+                                                between(case_age, 30, 40) ~ "30 - 40", 
+                                                between(case_age, 40, 50) ~ "40 - 50", 
+                                                between(case_age, 50, 60) ~ "50 - 60", 
+                                                between(case_age, 60, 70) ~ "60 - 70", 
+                                                case_age > 70 ~ "70 +"), 
+                                     age_cat = if_else(is.na(age_cat), "unknown", age_cat), 
+                                     age_cat = fct_relevel(age_cat, c("< 10", "10 - 20", "20 - 30", "30 - 40", "40 - 50", "50 - 60", "60 - 70", "70 +"))) %>% 
+  
+  relocate(age_cat, .after = case_age)
+
+#recode all variables - if NA then set as unknown  
+
+clean_data <- clean_data %>% mutate(across(fct_vars, as.character),
+                      across(fct_vars, ~if_else(is.na(.x), "unknown", .x)),
+                      across(fct_vars, as_factor))
+
+#recode specific variables
+
+clean_data <- clean_data %>% 
+  mutate( hospitalized = recode(hospitalized, "yes" = "hospitalised", "no" = "not hospitalised"))
+
+
+```
+
+# Person 
+
+# Time 
+```{r date handling, eval = T, echo = F, include = F, warning = F, message = F}
+
+# check the symptoms onset dates - many dates are missed typed 
+clean_data %>% group_by(floor_date(sym_startdt_FALSE, "year")) %>% count()
+
+#clean the symptoms onset dates 
+#make NA all dates that are prior to Nov 2019 & make NA all date that are past the current date
+clean_data <-  clean_data %>%
+  mutate(sym_startdt_clean =  dplyr::if_else(sym_startdt_FALSE > as.Date("2019-11-01"), 
+                                             
+                                             if_else(sym_startdt_FALSE > Sys.Date(), 
+                                                     as.Date(NA), 
+                                                     sym_startdt_FALSE),
+                                             
+                                             as.Date(NA))) %>% 
+  
+  relocate(sym_startdt_clean, .after = sym_startdt_FALSE)
+
+#check the confirmation dates - 122 missing dates but no out of boundaries
+clean_data %>% group_by(floor_date(pos_sampledt_FALSE, "year")) %>% count()
+
+```
+
+```{r incidence calculation, include = F}
+#calculate incidence and get ISO-weeks for the outbreak for later uses
+inci <- incidence(clean_data$pos_sampledt_FALSE, interval = "monday week")
+
+
+clean_data %>%
+  
+   group_by(weeks = ISOweek::ISOweek(floor_date(pos_sampledt_FALSE, "week", 
+                                                    week_start = getOption("lubridate.week.start",1))))  %>% 
+
+  
+  count() %>%   
+  
+  #remove cases with no dates - 
+  drop_na(weeks)
+
+```
+
+The peak of the outbreak was reached on week  ``r date2week(find_peak(inci), floor_day = T)``, with a total of ``r max(inci$count) `` cases.  ``r nrow(filter(clean_data, is.na(pos_sampledt_FALSE)))`` cases had missing dates, and they were excluded from the epicurves.
+
+<center>
+```{r main epicurve, echo = F}
+#this is the main Epicurve - I need to display the accurate week names and pivot week labels
+clean_data %>%
+  
+   group_by(weeks = ISOweek::ISOweek(floor_date(pos_sampledt_FALSE, "week", 
+                                                    week_start = getOption("lubridate.week.start",1))))  %>% 
+
+  
+  count() %>%   
+  
+  #remove cases with no dates - 
+  drop_na(weeks) %>% 
+  
+  hchart("column", hcaes(x = weeks, y = 'n')) %>% 
+  
+  hc_colors("#F4D497") %>% 
+  
+  hc_plotOptions(column = list(cropThreshold = 1000), 
+                 series = list(groupPadding = 0, 
+                               pointPadding = -0)) %>% 
+  
+  
+  hc_xAxis(categories = unique(.$weeks)) %>% 
+  
+  hc_title(text = paste0("Cases by weeks of confirmation"), 
+           align = "left", 
+           style = list(useHTML =T, color = "#34495E", fontSize= 13)) %>%
+  
+  hc_tooltip(useHTML = T,
+             formatter = JS("function(){
+     outHTML =  '<b>' + this.point.weeks + '</b>' + '<br> <b> N cases: </b>' + this.point.n + '<br> <b>'
+     return(outHTML)
+     }"))
+
+```
+
+```{r epicurve function, include = F}
+
+#define a function to create an interactive Epicurve where you can specify a grouping variable
+
+epicurve <- function(clean_data, grouping_var, var_title) {
+  
+  #compute sum for each weeks
+  week_sum <- clean_data %>%
+  
+   group_by(weeks = floor_date(pos_sampledt_FALSE, "week", 
+                               week_start = getOption("lubridate.week.start",1))) %>% 
+  
+  count(name = "N") %>% mutate(isoweeks = ISOweek::ISOweek(weeks)) %>% relocate(isoweeks, .after = weeks)
+
+clean_data %>%
+  
+   group_by(weeks = floor_date(pos_sampledt_FALSE, "week", 
+                               week_start = getOption("lubridate.week.start",1)), 
+            grouping_var) %>% 
+  
+  count(name = "n") %>% 
+  
+  left_join(., week_sum, by = "weeks") %>% 
+  
+  mutate(percent = round(digits = 2, n/N*100)) %>% 
+  
+  drop_na(weeks) %>% 
+  
+  hchart("column", hcaes(x = weeks, y = 'n', group = grouping_var), stacking = "normal") %>% 
+  
+  hc_plotOptions(column = list(cropThreshold = 1000), 
+                 series = list(groupPadding = 0, 
+                               pointPadding = -0)) %>% 
+  
+  
+  hc_xAxis(categories = unique(.$weeks)) %>% 
+  
+  hc_title(text = paste0("Cases by week of confirmation and <b>", var_title), 
+           align = "left", 
+           style = list(useHTML =T, color = "#34495E", fontSize= 13)) %>%
+    
+    hc_tooltip(useHTML = T,
+             formatter = JS(
+               "
+     function(){
+     outHTML =  '<b>' + this.point.isoweeks + '</b>' + '<br><b>' + this.point.grouping_var + '<br>N cases: </b>' + this.point.n + '<br> <b> % of weekly cases: </b>' +this.point.percent 
+     return(outHTML)
+     }
+     "))
+  
+}
+
+```
+
+
+```{r groups epicurves, echo = F}
+
+hw_grid( 
+  
+  #Sex
+  epicurve(clean_data = clean_data, grouping_var = clean_data$case_gender, var_title= "Sex") %>%
+  
+  hc_colors(c("#D6F2FA", "#EAD6FA", "#F9EDC2")), 
+  
+  #Age group
+   epicurve(clean_data = clean_data, grouping_var = clean_data$age_cat, var_title= "Age categories") %>%
+  
+  hc_colors(c("#D5F5E3", "#ABEBC6", "#82E0AA", "#58D68D", "#2ECC71", "#239B56", "#1D8348", "#186A3B", "#17202A")), 
+   
+   #Diagnostic status - only one level but could be useful if suspected/probable cases added
+    epicurve(clean_data = clean_data, grouping_var = clean_data$covid_dx, var_title= "diagnostic status") %>%
+  
+    hc_colors(c("#D6F2FA", "#EAD6FA", "#F9EDC2")), 
+    
+  #Hospitalisations
+    epicurve(clean_data = clean_data, grouping_var = clean_data$hospitalized, var_title= "Hospitalisation status") %>%
+  
+    hc_colors(c("#A9DFBF", "#F5B7B1", "#F9EDC2" )) )
+```
+</center>
+
+# Place 
+
+
+```{r load spatial data}
+
+
+
+
+```
+
+
 #2. need to load data 
 #3. 
