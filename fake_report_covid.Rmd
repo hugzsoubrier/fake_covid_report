@@ -9,6 +9,9 @@ output:
 # Do the set - up of the document data libraries 
 ```{r library loading, include = F}
 library(shiny)
+library(sf)
+library(raster)
+library(leaflet)
 library(shinyWidgets)
 library(skimr)
 library(epikit)
@@ -59,7 +62,7 @@ fct_vars <- data %>% select(contains("sym"), #select all symptoms var
 date_vars <- data %>% select(case_dob_FALSE, contains("dt")) %>% names()
 
 #create vector for numeric variables
-numeric_vars <- data %>% select(case_age, latitude_JITT, longitude_JITT) %>% names()
+numeric_vars <- data %>% select(case_zip, case_age, latitude_JITT, longitude_JITT) %>% names()
 
 #create vector for character variables
 character_vars <- data %>% select(PID) %>% names()
@@ -276,7 +279,61 @@ hw_grid(
 # Place 
 
 
-```{r load spatial data}
+```{r load spatial data, include = F}
+
+#read spatial data and make the ZipCode variable the same type as the case_zip in the Epi data for joining - numeric
+vector <- read_sf("data/vectors/FultonCountyZipCodes.shp") %>% 
+  mutate(ZipCode = as.numeric(ZipCode))
+
+#set the CRS to 4326 - WGS 1984
+vector <- st_transform(vector, 4326)
+
+#make clean_data spatial referenced - drop NA in long and lat var - set crs as WGS 1984
+clean_data_sf <- clean_data %>% 
+  
+  drop_na(longitude_JITT, latitude_JITT) %>% 
+
+  st_as_sf(coords = c("longitude_JITT", "latitude_JITT"), crs = 4326) 
+
+#some cases have long and lat around 0 - probably typos need to be dealt with
+hist(clean_data$longitude_JITT)
+hist(clean_data$latitude_JITT)
+
+#only keep cases which are found within the vector dataset - perform a spatial filter
+clean_data_sf <- st_filter(clean_data_sf, vector)
+
+
+
+```
+
+
+```{r cases map, message = F, echo = F}
+
+#display map of cases to identify potentially undersampled locations - not the case here 
+
+
+
+
+
+
+
+
+
+
+#join spatial data and epi data 
+clean_data_sf <- left_join(clean_data, vector, by = c("case_zip" = "ZipCode"))
+
+
+clean_data_sf %>% group_by(weeks = floor_date(pos_sampledt_FALSE, "week", 
+                               week_start = getOption("lubridate.week.start",1)), 
+                           
+                           case_zip, 
+                           Population) %>% 
+  
+  count(.drop = F) %>% 
+  
+  mutate(AR = round(digits = 2, n/Population * 10000))
+
 
 
 
