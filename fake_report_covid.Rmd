@@ -6,8 +6,17 @@ output:
   html_document:
     toc: true
 ---
-# Do the set - up of the document data libraries 
-```{r library loading, include = F}
+
+```{r set up, include = F}
+
+knitr::opts_chunk$set(echo = FALSE,       
+                      error = TRUE,
+                      message = FALSE, 
+                      warning = F)
+
+```
+
+```{r library loading}
 #spatial analysis 
 library(shiny)
 library(sf)
@@ -43,7 +52,7 @@ library(tidyverse)
 library(highcharter)
 ```
 
-```{r data loading & cleaning, echo = F, eval = T, message = F}
+```{r data loading & cleaning,}
 #read data
 data <- import(here("data", "covid_example_data.xlsx"))
 
@@ -85,6 +94,25 @@ needtidy_vars <- clean_data %>% select(where(is.factor)) %>% colnames()
 # use linelist::clean_data on it 
 clean_data[needtidy_vars] <- clean_data %>% select(all_of(needtidy_vars)) %>% clean_data()
 
+#drop all observations that do not have a valid date - using pos_sampledt_FALSE as the main date variable - infering that this is the date of positive testing for COVID 
+
+clean_data <- drop_na(clean_data, pos_sampledt_FALSE)
+
+```
+
+```{r spatial data loading, include = F}
+#read spatial data and make the ZipCode variable the same type as the case_zip in the Epi data for joining - numeric
+vector <- read_sf("data/vectors/FultonCountyZipCodes.shp") %>% 
+  mutate(ZipCode = as.numeric(ZipCode))
+
+#set the CRS to 4326 - WGS 1984
+vector <- st_transform(vector, 4326)
+
+#extract population data to perform aggregation - remove geometry for now
+pop_data <- vector %>% 
+  dplyr::select(ZipCode, Population) %>% 
+  st_drop_geometry()
+
 ```
 
 ```{r data recoding & classifying, include = F}
@@ -111,14 +139,39 @@ clean_data <- clean_data %>% mutate(across(fct_vars, as.character),
 #recode specific variables
 
 clean_data <- clean_data %>% 
-  mutate( hospitalized = recode(hospitalized, "yes" = "hospitalised", "no" = "not hospitalised"))
+  mutate( hospitalized = recode(hospitalized, 
+                                "yes" = "hospitalised",
+                                "no" = "not hospitalised"))
 
 
 ```
 
-# Person 
+```{r incidence calculation, include = F}
+#calculate incidence and get ISO-weeks for the outbreak for later uses
+inci <- incidence(clean_data$pos_sampledt_FALSE, interval = "monday week")
 
-# Time 
+```
+## Overview 
+Between the  ``r min(inci$dates) `` and the ``r max(inci$dates) `` ( a period ``r inci$timespan `` days) of a total of ``r inci$n`` cases have been identified, of which ``r fmt_count(clean_data, covid_dx == "confirmed")`` are confirmed cases. 
+
+- In Fulton County, and over this period, the **attack rate** is of ``r fmt_ci_df(attack_rate(inci$n, population = sum(pop_data$Population), multiplier = 10000), percent = F)`` per 10 000.
+
+- Amongst all cases, at least ``r fmt_count(clean_data, hospitalized == "hospitalised")`` have been **hospitalised**, but ``r fmt_count(clean_data, hospitalized == "unknown")`` still have an **unknown** status 
+
+- With reports of ``r count(filter(clean_data, died_covid == "yes"))`` deaths due to COVID, the **Case Fatality Ratio** is of ``r fmt_ci_df(case_fatality_rate_df(clean_data, died_covid == "yes"))``, but importantly, ``r fmt_count(clean_data, died_covid == "unknown")`` of cases missing outcome status. 
+
+## Person 
+
+```{r}
+
+case_fatality_rate_df(clean_data, 
+                      died_covid == "yes")
+
+
+```
+
+
+## Time 
 ```{r date handling, eval = T, echo = F, include = F, warning = F, message = F}
 
 # check the symptoms onset dates - many dates are missed typed 
@@ -142,23 +195,7 @@ clean_data %>% group_by(floor_date(pos_sampledt_FALSE, "year")) %>% count()
 
 ```
 
-```{r incidence calculation, include = F}
-#calculate incidence and get ISO-weeks for the outbreak for later uses
-inci <- incidence(clean_data$pos_sampledt_FALSE, interval = "monday week")
 
-
-clean_data %>%
-  
-   group_by(weeks = ISOweek::ISOweek(floor_date(pos_sampledt_FALSE, "week", 
-                                                    week_start = getOption("lubridate.week.start",1))))  %>% 
-
-  
-  count() %>%   
-  
-  #remove cases with no dates - 
-  drop_na(weeks)
-
-```
 
 The peak of the outbreak was reached on week  ``r date2week(find_peak(inci), floor_day = T)``, with a total of ``r max(inci$count) `` cases.  ``r nrow(filter(clean_data, is.na(pos_sampledt_FALSE)))`` cases had missing dates, and they were excluded from the epicurves.
 
@@ -280,18 +317,10 @@ hw_grid(
 ```
 </center>
 
-# Place 
+## Place 
 
 
-```{r load spatial data, include = F}
-
-#read spatial data and make the ZipCode variable the same type as the case_zip in the Epi data for joining - numeric
-vector <- read_sf("data/vectors/FultonCountyZipCodes.shp") %>% 
-  mutate(ZipCode = as.numeric(ZipCode))
-
-#set the CRS to 4326 - WGS 1984
-vector <- st_transform(vector, 4326)
-
+```{r spatial reference of clean_data, include = F}
 #make clean_data spatial referenced - drop NA in long and lat var - set crs as WGS 1984
 clean_data_sf <- clean_data %>% 
   
@@ -354,21 +383,32 @@ ggplot() +
 
 ```
 </center>
-```{r}
 
-#join spatial data and epi data 
-clean_data_sf <- left_join(clean_data, vector, by = c("case_zip" = "ZipCode"))
+## Chloropleths maps 
+
+Below are displayed the Attack rates within Zip codes of Fulton country. 
+
+```{r data aggregating}
 
 
-clean_data_sf %>% group_by(weeks = floor_date(pos_sampledt_FALSE, "week", 
+subset_clean_data <- clean_data %>% dplyr::select(case_zip, died_covid, hospitalized, pos_sampledt_FALSE)
+
+#extract population data to perform aggregation - remove geometry for now
+pop_data <- vector %>% 
+  dplyr::select(ZipCode, Population) %>% 
+  st_drop_geometry()
+
+#join pop data and epi data 
+
+subset_clean_data <- left_join(subset_clean_data, pop_data, by = c("case_zip" = "ZipCode"))
+
+subset_clean_data %>% group_by(weeks = floor_date(pos_sampledt_FALSE, "week", 
                                week_start = getOption("lubridate.week.start",1)), 
-                           
-                           case_zip, 
-                           Population) %>% 
+                               case_zip) %>%
   
-  count(.drop = F) %>% 
+  summarise(AR = n()/Population * 10000) 
   
-  mutate(AR = round(digits = 2, n/Population * 10000))
+#join spatial data and epi data 
 
 
 
