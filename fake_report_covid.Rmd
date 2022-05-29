@@ -54,6 +54,7 @@ library(tidyselect)
 library(tidyverse)
 library(highcharter)
 ```
+## Introduction 
 
 ```{r data loading & cleaning,}
 #read data
@@ -96,11 +97,6 @@ needtidy_vars <- clean_data %>% select(where(is.factor)) %>% colnames()
 
 # use linelist::clean_data on it 
 clean_data[needtidy_vars] <- clean_data %>% select(all_of(needtidy_vars)) %>% clean_data()
-
-
-#drop all observations that do not have a valid date - using pos_sampledt_FALSE as the main date variable - infering that this is the date of positive testing for COVID 
-clean_data <- drop_na(clean_data, pos_sampledt_FALSE)
-
 
 #Age 
 #make NA all obs that have an age < 0
@@ -151,6 +147,10 @@ clean_data <- clean_data %>%
                                 "yes" = "hospitalised",
                                 "no" = "not hospitalised"))
 
+clean_data <- clean_data %>% 
+  mutate(died_covid = recode( died_covid, 
+                              "under_review" = "under review"))
+
 
 ```
 
@@ -161,22 +161,24 @@ inci <- incidence(clean_data$pos_sampledt_FALSE, interval = "monday week")
 ```
 
 ## **Overview** 
-Between the  ``r min(inci$dates) `` and the ``r max(inci$dates) `` (a period ``r inci$timespan `` days) a total of ``r inci$n`` cases have been identified, of which ``r fmt_count(clean_data, covid_dx == "confirmed")`` are **confirmed** cases. 
+Between the  `r min(inci$dates)` and the `r max(inci$dates)` (a period `r inci$timespan ` days) a total of `r inci$n` cases have been identified, of which `r fmt_count(clean_data, covid_dx == "confirmed")` are **confirmed** cases. 
 
-- In Fulton County, and over this period, the **attack rate** is of ``r fmt_ci_df(attack_rate(inci$n, population = sum(pop_data$Population), multiplier = 10000), percent = F)`` per 10 000.
+- In Fulton County, and over this period, the **attack rate** is of `r fmt_ci_df(attack_rate(inci$n, population = sum(pop_data$Population), multiplier = 10000), percent = F)` per 10 000.
 
-- Amongst all cases, at least ``r fmt_count(clean_data, hospitalized == "hospitalised")`` have been **hospitalised**, but ``r fmt_count(clean_data, hospitalized == "unknown")`` still have an **unknown** status 
+- Amongst all cases, at least `r fmt_count(clean_data, hospitalized == "hospitalised")` have been **hospitalised**, but `r fmt_count(clean_data, hospitalized == "unknown")` still have an **unknown** status 
 
-- With reports of ``r count(filter(clean_data, died_covid == "yes"))`` deaths due to COVID, the **Case Fatality Ratio** is of ``r fmt_ci_df(case_fatality_rate_df(clean_data, died_covid == "yes"))``, but importantly, ``r fmt_count(clean_data, died_covid == "unknown")`` of cases missing outcome status. 
+- Using only cases with known outcome, the **Case Fatality Ratio** is of `r fmt_ci_df(case_fatality_rate_df(filter(clean_data, !str_detect(died_covid, "unknown|under review")), died_covid == "yes"))`, but importantly, `r fmt_count(clean_data, died_covid == "under review")` cases are under review, and `r fmt_count(clean_data, died_covid == "unknown")` of cases missing outcome status. 
 
 ## **Person** 
 
-Since the start of the outbreak there was,  ``r fmt_count(clean_data, case_gender == "female")`` female  cases and ``r fmt_count(clean_data, case_gender == "male")`` male cases. 
+Since the start of the outbreak there was,  `r fmt_count(clean_data, case_gender == "female")` female  cases and `r fmt_count(clean_data, case_gender == "male")` male cases. 
 
-The Age of cases ranges from ``r min(clean_data$case_age, na.rm=T) `` to ``r max(clean_data$case_age, na.rm=T)``, with Age group ``r slice_tail(arrange(tabyl(clean_data$age_cat),n))[1]`` the most represented, with 
-``r round(digits =5, slice_tail(arrange(tabyl(clean_data$age_cat),n))[1,2])`` (``r round(digits = 2, slice_tail(arrange(tabyl(clean_data$age_cat),n))[1,3])``%) cases. 
+The Age of cases ranges from `r min(clean_data$case_age, na.rm=T) ` to `r max(clean_data$case_age, na.rm=T)`, with Age group `r slice_tail(arrange(tabyl(clean_data$age_cat),n))[1]` the most represented, with 
+``r round(digits =5, slice_tail(arrange(tabyl(clean_data$age_cat),n))[1,2])`` (`r round(digits = 2, slice_tail(arrange(tabyl(clean_data$age_cat),n))[1,3])`%) cases. 
 
-### Age/sex pyramid of cases 
+There is `r fmt_count(clean_data, case_gender == "unknown")` cases with missing data on Sex, and `r fmt_count(clean_data, age_cat == "unknown")` cases with missing data on Age. 
+
+### Age and Sex distributions
 
 ```{r Sex vs age group distribution }
 
@@ -189,7 +191,7 @@ clean_data %>%
   augment_redundant("cases (n)" = "n$") %>% 
   
   #style kable
-  kable(caption = "Distribution of cases per <b>case gender</b> and <b>Age groups</b>",
+  kable(caption = "Distribution of cases per <b>Age groups</b> and <b>case gender</b>",
         align = "c",
         digits = 2) %>%
   
@@ -200,31 +202,127 @@ clean_data %>%
 ```
 
 
-### Hospitalisations 
-
-#### Age group 
+#### Age-Sex pyramid
 
 ```{r}
 
 ```
 
+### Hospitalisations 
+
+This section investigates the Hospitalisations due to COVID throughout Age groups and sex. 
+
+Overall Hospitalisation rates is of `r fmt_ci_df(case_fatality_rate_df(clean_data, hospitalized == "hospitalised"))`, but `r fmt_count(clean_data, hospitalized == "unknown")` still have an **unknown** status. 
+
+#### Age group 
+
+The age group, `r slice_tail(arrange(case_fatality_rate_df(clean_data, hospitalized == "hospitalised", group = age_cat), cfr))$age_cat` had the greatest hospitalisation rate of `r round(digits = 2, slice_tail(arrange(case_fatality_rate_df(clean_data, hospitalized == "hospitalised", group = age_cat), cfr))$cfr)`% `r slice_tail(arrange(case_fatality_rate_df(clean_data, hospitalized == "hospitalised", group = age_cat, mergeCI=T), cfr))$ci`. 
+
+```{r hospitalisation rates per age_group }
+#using the case_fatality_rate_df() function to calculate the Hospitalisation rates 
+
+case_fatality_rate_df(clean_data, 
+                      hospitalized == "hospitalised", 
+                      group = age_cat, 
+                      mergeCI = T) %>% 
+  
+  rename("hospitalisations" = deaths, 
+         "Hosp. rate" = cfr, 
+         "95%-CI" = ci, 
+         "Age groups" = age_cat) %>% 
+ 
+   kable(caption = "Hospitalisation rates per <b>Age groups</b>",
+        align = "c",
+        digits = 2) %>%
+  
+  kable_styling("hover", 
+                full_width = F) 
+
+
+```
 
 #### Sex
 
-```{r}
+Hopsitalisations rates remained similar between Male  (`r round(digits = 2, filter(case_fatality_rate_df(clean_data, hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "male")$cfr)`% `r filter(case_fatality_rate_df(clean_data, hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "male")$ci`) and Female (`r round(digits = 2, filter(case_fatality_rate_df(clean_data, hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "female")$cfr)`% `r filter(case_fatality_rate_df(clean_data, hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "female")$ci` )
+
+```{r hospitalisation rates per Sex}
+case_fatality_rate_df(clean_data, 
+                      hospitalized == "hospitalised", 
+                      group = case_gender, 
+                      mergeCI = T) %>% 
+  
+  rename("hospitalisations" = deaths, 
+         "Hosp. rate" = cfr, 
+         "95%-CI" = ci, 
+         "Sex" = case_gender) %>% 
+ 
+   kable(caption = "Hospitalisation rates per <b> Sex </b>",
+        align = "c",
+        digits = 2) %>%
+  
+  kable_styling("hover", 
+                full_width = F) 
 
 ```
 
-### Deaths 
+### COVID Deaths 
+
+This section looks into the CFR within Age groups and sex. 
+
+Using only cases with known outcome, the Overall CFR is of `r fmt_ci_df(case_fatality_rate_df(filter(clean_data, !str_detect(died_covid, "unknown|under review")), died_covid == "yes"))`. 
+
+Importantly, `r fmt_count(clean_data, died_covid == "under review")` cases are **under review**, while `r fmt_count(clean_data, died_covid == "unknown")` have unknown **outcome**. 
 
 #### Age group 
-```{r}
+```{r CFR per age group}
+clean_data %>% 
+  
+    #filter out all cases with no outcome info
+  filter(!str_detect(died_covid, "unknown|under review")) %>% 
+  #calculate CFR per each group
+  case_fatality_rate_df(
+                        died_covid == "yes",
+                        group= age_cat,
+                        mergeCI = T) %>% 
+  #rename
+  rename("Age groups" = age_cat, 
+         "CFR" = cfr, 
+         "95%-CI" = ci) %>% 
+  
+  #style kable
+  kable(caption = "Distribution of <b>COVID CFR</b> per <b>Age group</b>",
+        align = "c",
+        digits = 2) %>%
+  
+  kable_styling("hover", 
+                full_width = F) 
 
 ```
 
 #### Sex 
-```{r}
 
+```{r CFR per sex }
+clean_data %>% 
+  #filter out all cases with no outcome info
+  filter(!str_detect(died_covid, "unknown|under review")) %>% 
+  
+  #calculate CFR per group
+  case_fatality_rate_df(
+                        died_covid == "yes",
+                        group= case_gender,
+                        mergeCI = T) %>% 
+  #rename vars
+  rename("Sex" = case_gender, 
+         "CFR" = cfr, 
+         "95%-CI" = ci) %>% 
+  
+  #style kable
+  kable(caption = "Distribution of <b>COVID CFR</b> per <b>Sex</b>",
+        align = "c",
+        digits = 2) %>%
+  
+  kable_styling("hover", 
+                full_width = F) 
 ```
 
 ## **Time**
@@ -373,6 +471,26 @@ hw_grid(
     hc_colors(c("#A9DFBF", "#F5B7B1", "#F9EDC2" )) )
 ```
 </center>
+
+### Weekly Attack Rates, Hospitalisation rates and CFR
+
+
+```{r}
+
+
+
+
+
+
+
+
+```
+
+
+
+
+
+
 
 ## **Place** 
 ```{r spatial reference of clean_data, include = F}
