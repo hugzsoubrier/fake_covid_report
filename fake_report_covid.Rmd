@@ -27,6 +27,8 @@ library(raster)
 library(leaflet)
 
 #epidemiological analysis 
+
+library(ISOweek)
 library(shinyWidgets)
 library(sitrep)
 library(skimr)
@@ -165,7 +167,7 @@ Between the  `r min(inci$dates)` and the `r max(inci$dates)` (a period `r inci$t
 
 - In Fulton County, and over this period, the **attack rate** is of `r fmt_ci_df(attack_rate(inci$n, population = sum(pop_data$Population), multiplier = 10000), percent = F)` per 10 000.
 
-- Amongst all cases, at least `r fmt_count(clean_data, hospitalized == "hospitalised")` have been **hospitalised**, but `r fmt_count(clean_data, hospitalized == "unknown")` still have an **unknown** status 
+- Amongst all cases of known hospitalisation status, at least `r fmt_count(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised")` have been **hospitalised**, but `r fmt_count(clean_data, hospitalized == "unknown")` still have an **unknown** status 
 
 - Using only cases with known outcome, the **Case Fatality Ratio** is of `r fmt_ci_df(case_fatality_rate_df(filter(clean_data, !str_detect(died_covid, "unknown|under review")), died_covid == "yes"))`, but importantly, `r fmt_count(clean_data, died_covid == "under review")` cases are under review, and `r fmt_count(clean_data, died_covid == "unknown")` of cases missing outcome status. 
 
@@ -212,16 +214,16 @@ clean_data %>%
 
 This section investigates the Hospitalisations due to COVID throughout Age groups and sex. 
 
-Overall Hospitalisation rates is of `r fmt_ci_df(case_fatality_rate_df(clean_data, hospitalized == "hospitalised"))`, but `r fmt_count(clean_data, hospitalized == "unknown")` still have an **unknown** status. 
+Overall Hospitalisation rates is of `r fmt_ci_df(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised"))`, but `r fmt_count(clean_data, hospitalized == "unknown")` still have an **unknown** status. 
 
 #### Age group 
 
-The age group, `r slice_tail(arrange(case_fatality_rate_df(clean_data, hospitalized == "hospitalised", group = age_cat), cfr))$age_cat` had the greatest hospitalisation rate of `r round(digits = 2, slice_tail(arrange(case_fatality_rate_df(clean_data, hospitalized == "hospitalised", group = age_cat), cfr))$cfr)`% `r slice_tail(arrange(case_fatality_rate_df(clean_data, hospitalized == "hospitalised", group = age_cat, mergeCI=T), cfr))$ci`. 
+The age group, `r slice_tail(arrange(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised", group = age_cat), cfr))$age_cat` had the greatest hospitalisation rate of `r round(digits = 2, slice_tail(arrange(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised", group = age_cat), cfr))$cfr)`% `r slice_tail(arrange(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised", group = age_cat, mergeCI=T), cfr))$ci`. 
 
 ```{r hospitalisation rates per age_group }
 #using the case_fatality_rate_df() function to calculate the Hospitalisation rates 
 
-case_fatality_rate_df(clean_data, 
+case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), 
                       hospitalized == "hospitalised", 
                       group = age_cat, 
                       mergeCI = T) %>% 
@@ -243,10 +245,10 @@ case_fatality_rate_df(clean_data,
 
 #### Sex
 
-Hopsitalisations rates remained similar between Male  (`r round(digits = 2, filter(case_fatality_rate_df(clean_data, hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "male")$cfr)`% `r filter(case_fatality_rate_df(clean_data, hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "male")$ci`) and Female (`r round(digits = 2, filter(case_fatality_rate_df(clean_data, hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "female")$cfr)`% `r filter(case_fatality_rate_df(clean_data, hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "female")$ci` )
+Hopsitalisations rates remained similar between Male  (`r round(digits = 2, filter(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "male")$cfr)`% `r filter(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "male")$ci`) and Female (`r round(digits = 2, filter(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "female")$cfr)`% `r filter(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "female")$ci` )
 
 ```{r hospitalisation rates per Sex}
-case_fatality_rate_df(clean_data, 
+case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), 
                       hospitalized == "hospitalised", 
                       group = case_gender, 
                       mergeCI = T) %>% 
@@ -346,7 +348,6 @@ clean_data <-  clean_data %>%
 
 #check the confirmation dates - 122 missing dates but no out of boundaries
 clean_data %>% group_by(floor_date(pos_sampledt_FALSE, "year")) %>% count()
-
 ```
 
 ### Main Epicurve
@@ -475,9 +476,134 @@ hw_grid(
 ### Weekly Attack Rates, Hospitalisation rates and CFR
 
 
-```{r}
+```{r compute weekly attack rate, Hosp. rate and CFR}
+
+#calculate N cases per weeks, required for attack_rate()
+weekly_cases <- clean_data %>% 
+  
+  drop_na(pos_sampledt_FALSE) %>% #remove samples that do not have a valid date of confirmation
+  
+  group_by(ISOweek = ISOweek::ISOweek(floor_date(pos_sampledt_FALSE, "weeks")))  %>% 
+  
+  count() %>% 
+  
+  #add pop data of Fulton county
+  mutate(population = sum(pop_data$Population))
+
+#AR
+weekly_ar <- attack_rate(weekly_cases$n, 
+               population = weekly_cases$population, 
+              mergeCI= F, 
+              multiplier = 10000) %>% 
+    
+    bind_cols(select(weekly_cases, ISOweek)) %>% #add ISOweek variable
+    #set as first var
+    relocate(ISOweek, 1) %>% 
+  
+  #change digits number for estimates and CI 
+  mutate(across(c(ar, lower, upper), ~round(.x, digits = 2)))
+  
 
 
+#weekly Hosp. rate - calculated using the case_fatality_rate()
+weekly_hosp_rate <- clean_data %>% 
+  
+  arrange(pos_sampledt_FALSE) %>% #arrange dates from earlier - latest
+  
+  mutate(ISOweek = as_factor(ISOweek(pos_sampledt_FALSE)))  %>% #create an ISOweek var for graph
+  
+  filter(hospitalized != "unknown") %>% #remove all not hospitalised
+
+case_fatality_rate_df(., #compute hospitalisation rates grouped by epiweeks 
+                      hospitalized == "hospitalised", 
+                      group = ISOweek, 
+                      mergeCI = F) %>% 
+  #rename var accordingly
+  rename("hospitalisations" = deaths, 
+         "hosp_rate" = cfr) %>% 
+  
+  #change digits number for estimates and CI 
+  mutate(across(c(hosp_rate, lower, upper), ~round(.x, digits = 2)))
+
+
+
+
+#CFR - same logic as hospitalisation rates
+weekly_cfr <- clean_data %>% 
+  
+  arrange(pos_sampledt_FALSE) %>% 
+  
+  mutate(ISOweek = as_factor(ISOweek(pos_sampledt_FALSE)))  %>% 
+  
+  filter(!str_detect(died_covid, "unknown|under review")) %>% #remove all with unknown/under review 
+  
+  arrange(ISOweek) %>% 
+
+case_fatality_rate_df(., 
+                      died_covid == "yes", 
+                      group = ISOweek, 
+                      mergeCI = F) %>%
+  
+  #change digits number for estimates and CI 
+  mutate(across(c(cfr, lower, upper), ~round(.x, digits = 2)))
+
+```
+
+
+```{r AR, CFR, and hosp rate tables, eval = F}
+#weekly Tables for rates -- not evaluated as all info are on the plot 
+
+#weekly AR table
+ weekly_ar %>%  
+   
+   merge_ci_df(e = 4,
+               l = 5, 
+               u =6) %>% 
+   rename( "95%-CI" = ci, 
+           "AR per 10000" = ar ) %>% 
+   
+   kable(caption = "Attack Rates per <b>ISOweeks</b> of the outbreak",
+        align = "c",
+        digits = 3) %>%
+  
+  kable_styling("hover", 
+                full_width = F)
+
+
+#weekly Hospi. rate table 
+weekly_hosp_rate  %>%  
+  
+  merge_ci_df(e =4, 
+              l =5, 
+              u =6) %>% 
+  
+  rename("95%-CI" = ci, 
+         "Hosp. rate" = hosp_rate) %>% 
+  
+  
+  kable(caption = "Hospitalisation Rates per <b>ISOweeks</b> of the outbreak",
+        align = "c",
+        digits = 3) %>%
+  
+  kable_styling("hover", 
+                full_width = F)
+
+#weekly CFR table 
+weekly_cfr %>%  
+  
+  merge_ci_df(e =4, 
+              l =5, 
+              u =6 ) %>% 
+  
+  rename("95%-CI" = ci, 
+         "CFR" = cfr) %>% 
+  
+  kable(caption = "Case Fatality Rates per <b>ISOweeks</b> of the outbreak",
+        align = "c",
+        digits = 3) %>%
+  
+  kable_styling("hover", 
+                full_width = F)
 
 
 
@@ -486,9 +612,105 @@ hw_grid(
 
 ```
 
+<center>
+```{r rates graph}
+highchart() %>% 
+  
+  #plot the AR 
+  hc_add_series(name = "Attack_rate", 
+                data = weekly_ar, 
+                "line", 
+                hcaes(x = ISOweek, 
+                      y = ar), 
+                color = "#5496D9", 
+                fillOpacity= .8, 
+                marker = list(enabled = F, 
+                              radius = 2, 
+                              symbol = "circle"), 
+                linkedT0 = "AR 95%-CI") %>% 
+  #AR CI
+  hc_add_series(name = "AR 95%-CI",
+                type = "arearange",
+                data = weekly_ar,
+                hcaes(x = ISOweek, 
+                      low = weekly_ar$lower, 
+                      high = weekly_ar$upper ), 
+                linkedTo = "Attack rate", 
+                color = "#A9CDF1", 
+                fillOpacity= .2, 
+                marker = list(enabled = F, 
+                              radius = 2, 
+                              symbol = "circle"), 
+                lineWidth = 0) %>% 
+  
+  #Hosp.  rate
+  hc_add_series(name = "Hospitalisations rate", 
+                data = weekly_hosp_rate, 
+                "line", 
+                hcaes(x = ISOweek, 
+                      y = hosp_rate), 
+                color = "#EAD03C", 
+                fillOpacity= .8, 
+                marker = list(enabled = F, 
+                              radius = 2, 
+                              symbol = "circle")) %>% 
+  #Hosp rate - CI
+  hc_add_series(name = "Hosp.rate 95%-CI",
+                type = "arearange",
+                data = weekly_hosp_rate,
+                hcaes(x = ISOweek, 
+                      low = weekly_hosp_rate$lower, 
+                      high = weekly_hosp_rate$upper ), 
+                linkedTo = "Hospitalisation rate", 
+                color = "#DCD298", 
+                fillOpacity= .2, 
+                lineWidth = 0, 
+                marker = list(enabled = F, 
+                              radius = 2, 
+                              symbol = "circle")) %>% 
+  #CFR
+  hc_add_series(name = "CFR", 
+                data = weekly_cfr, 
+                "line", 
+                hcaes(x = ISOweek, 
+                      y = cfr), 
+                color = "#E84F4F", 
+                fillOpacity= .8, 
+                marker = list(enabled = F,
+                              radius = 2, 
+                              symbol = "circle")) %>% 
+  #CFR - CI
+  hc_add_series(name = "CFR 95%-CI",
+                type = "arearange",
+                data = weekly_cfr,
+                hcaes(x = ISOweek, 
+                      low = weekly_cfr$lower, 
+                      high = weekly_cfr$upper ), 
+                linkedTo = "CFR", 
+                lineWidth = 0,
+                color = "#F8C8C8", 
+                fillOpacity= .2, 
+                zIndex = 0, 
+                marker = list(enabled = F, 
+                              radius = 2, 
+                              symbol = "circle")) %>%
+  
+  hc_xAxis(categories = unique(weekly_ar$ISOweek)) %>% 
+  
+ hc_title(text = paste0("Attack Rate, Case Fatality Ratio and Hospitalisation rate by weeks of confirmation"), 
+           align = "left", 
+           style = list(useHTML =T, color = "#34495E", fontSize= 13)) %>% 
+  
+  hc_tooltip(shared = T,
+             crosshairs = T,
+             useHTML = T
+             )
 
 
 
+
+```
+</center>
 
 
 
