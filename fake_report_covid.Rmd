@@ -114,10 +114,15 @@ vector <- read_sf("data/vectors/FultonCountyZipCodes.shp") %>%
 #set the CRS to 4326 - WGS 1984
 vector <- st_transform(vector, 4326)
 
-#extract population data to perform aggregation - remove geometry for now
+#extract population data to perform ARs - remove geometry for now
 pop_data <- vector %>% 
   dplyr::select(ZipCode, Population) %>% 
   st_drop_geometry()
+
+#County 30331 is duplicated in the shapefile - need to remove one otherwise will be dupicated on map 
+pop_data %>% get_dupes()
+
+pop_data <- pop_data %>% filter(!duplicated(ZipCode))
 
 ```
 
@@ -176,9 +181,13 @@ Between the  `r min(inci$dates)` and the `r max(inci$dates)` (a period `r inci$t
 Since the start of the outbreak there was,  `r fmt_count(clean_data, case_gender == "female")` female  cases and `r fmt_count(clean_data, case_gender == "male")` male cases. 
 
 The Age of cases ranges from `r min(clean_data$case_age, na.rm=T) ` to `r max(clean_data$case_age, na.rm=T)`, with Age group `r slice_tail(arrange(tabyl(clean_data$age_cat),n))[1]` the most represented, with 
-``r round(digits =5, slice_tail(arrange(tabyl(clean_data$age_cat),n))[1,2])`` (`r round(digits = 2, slice_tail(arrange(tabyl(clean_data$age_cat),n))[1,3])`%) cases. 
+``r round(digits =2, slice_tail(arrange(tabyl(clean_data$age_cat),n))[1,2])`` (`r round(digits = 2, slice_tail(arrange(tabyl(clean_data$age_cat),n))[1,3]*100)`%) cases. 
 
 There is `r fmt_count(clean_data, case_gender == "unknown")` cases with missing data on Sex, and `r fmt_count(clean_data, age_cat == "unknown")` cases with missing data on Age. 
+
+### Missing data
+
+
 
 ### Age and Sex distributions
 
@@ -212,8 +221,6 @@ clean_data %>%
 
 ### Hospitalisations 
 
-This section investigates the Hospitalisations due to COVID throughout Age groups and sex. 
-
 Overall Hospitalisation rates is of `r fmt_ci_df(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised"))`, but `r fmt_count(clean_data, hospitalized == "unknown")` still have an **unknown** status. 
 
 #### Age group 
@@ -245,9 +252,10 @@ case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"),
 
 #### Sex
 
-Hopsitalisations rates remained similar between Male  (`r round(digits = 2, filter(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "male")$cfr)`% `r filter(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "male")$ci`) and Female (`r round(digits = 2, filter(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "female")$cfr)`% `r filter(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "female")$ci` )
+Hopsitalisations rates remained similar between **Male**  (`r round(digits = 2, filter(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "male")$cfr)`% `r filter(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "male")$ci`) and **Female** (`r round(digits = 2, filter(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "female")$cfr)`% `r filter(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised", group = case_gender, mergeCI = T), case_gender == "female")$ci` )
 
 ```{r hospitalisation rates per Sex}
+
 case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), 
                       hospitalized == "hospitalised", 
                       group = case_gender, 
@@ -269,41 +277,50 @@ case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"),
 
 ### COVID Deaths 
 
-This section looks into the CFR within Age groups and sex. 
-
 Using only cases with known outcome, the Overall CFR is of `r fmt_ci_df(case_fatality_rate_df(filter(clean_data, !str_detect(died_covid, "unknown|under review")), died_covid == "yes"))`. 
 
 Importantly, `r fmt_count(clean_data, died_covid == "under review")` cases are **under review**, while `r fmt_count(clean_data, died_covid == "unknown")` have unknown **outcome**. 
 
 #### Age group 
 ```{r CFR per age group}
-clean_data %>% 
+age_cat_cfr <- clean_data %>% 
   
     #filter out all cases with no outcome info
   filter(!str_detect(died_covid, "unknown|under review")) %>% 
-  #calculate CFR per each group
-  case_fatality_rate_df(
-                        died_covid == "yes",
+  
+  #calculate CFR per each group - do not merge CI here to be used later in inline function
+  case_fatality_rate_df(died_covid == "yes",
                         group= age_cat,
-                        mergeCI = T) %>% 
+                        mergeCI = F)
   #rename
+age_cat_cfr %>% 
+  
+  #merge CI 
+  mutate(lower = round(digits = 2, lower), 
+         upper = round(digits = 2, upper),
+    "95%-CI" = paste0("(", lower, "-", upper, ")")) %>% 
+  
+  select(-c(lower, upper)) %>% 
+  
+  
   rename("Age groups" = age_cat, 
-         "CFR" = cfr, 
-         "95%-CI" = ci) %>% 
+         "CFR" = cfr) %>% 
   
   #style kable
-  kable(caption = "Distribution of <b>COVID CFR</b> per <b>Age group</b>",
+  kable(caption = "Distribution of COVID <b>CFR</b> per <b>Age group</b>",
         align = "c",
         digits = 2) %>%
   
   kable_styling("hover", 
                 full_width = F) 
-
 ```
+
+**`r filter(filter(age_cat_cfr, age_cat !="unknown"), cfr == min(age_cat_cfr$cfr))$age_cat`** was the age group with the lowest CFR: `r fmt_ci_df(filter(filter(age_cat_cfr, age_cat !="unknown"), cfr == min(age_cat_cfr$cfr)), e = 4, l =5, u = 6)`. While **`r filter(filter(age_cat_cfr, age_cat !="unknown"), cfr == max(age_cat_cfr$cfr))$age_cat`** was the age group with the greatest CFR: `r fmt_ci_df(filter(filter(age_cat_cfr, age_cat !="unknown"), cfr == max(age_cat_cfr$cfr)), e = 4, l =5, u = 6) `
 
 #### Sex 
 
 ```{r CFR per sex }
+
 clean_data %>% 
   #filter out all cases with no outcome info
   filter(!str_detect(died_covid, "unknown|under review")) %>% 
@@ -319,7 +336,7 @@ clean_data %>%
          "95%-CI" = ci) %>% 
   
   #style kable
-  kable(caption = "Distribution of <b>COVID CFR</b> per <b>Sex</b>",
+  kable(caption = "Distribution of COVID <b>CFR</b> per <b>Sex</b>",
         align = "c",
         digits = 2) %>%
   
@@ -386,7 +403,15 @@ clean_data %>%
              formatter = JS("function(){
      outHTML =  '<b>' + this.point.weeks + '</b>' + '<br> <b> N cases: </b>' + this.point.n + '<br> <b>'
      return(outHTML)
-     }"))
+     }")) %>% 
+  
+  hc_navigator( enabled = TRUE, 
+                xAxis = list(
+                  labels = list(
+                    enabled = F
+                  )
+                )
+                )
 
 ```
 </center>
@@ -475,7 +500,6 @@ hw_grid(
 
 ### Weekly Attack Rates, Hospitalisation rates and CFR
 
-
 ```{r compute weekly attack rate, Hosp. rate and CFR}
 
 #calculate N cases per weeks, required for attack_rate()
@@ -492,7 +516,7 @@ weekly_cases <- clean_data %>%
 
 #AR
 weekly_ar <- attack_rate(weekly_cases$n, 
-               population = weekly_cases$population, 
+              population = weekly_cases$population, 
               mergeCI= F, 
               multiplier = 10000) %>% 
     
@@ -705,10 +729,6 @@ highchart() %>%
              crosshairs = T,
              useHTML = T
              )
-
-
-
-
 ```
 </center>
 
@@ -780,32 +800,249 @@ ggplot() +
 </center>
 
 ### Chloropleths maps 
+```{r AR per week and ZIP, include = F}
 
-Below are displayed the Attack rates within Zip codes of Fulton country. 
+#using clean_data, 1. calculate N cases per week and County, 2. We calculate the Attack rates per week and county 3. We subset AR tables in small and big regions because of the outliers. 4. We categorise the AR for mapping, 4. We spatial reference the AR tables using zip codes for mapping
 
-```{r data aggregating}
+#1. Calculate N cases per weeks and ZIP codes, required for attack_rate() - join the pop of each county
 
-
-subset_clean_data <- clean_data %>% dplyr::select(case_zip, died_covid, hospitalized, pos_sampledt_FALSE)
-
-#extract population data to perform aggregation - remove geometry for now
-pop_data <- vector %>% 
-  dplyr::select(ZipCode, Population) %>% 
-  st_drop_geometry()
-
-#join pop data and epi data 
-
-subset_clean_data <- left_join(subset_clean_data, pop_data, by = c("case_zip" = "ZipCode"))
-
-subset_clean_data %>% group_by(weeks = floor_date(pos_sampledt_FALSE, "week", 
-                               week_start = getOption("lubridate.week.start",1)), 
-                               case_zip) %>%
+weekly_zip_cases <- clean_data %>% 
   
-  summarise(AR = n()/Population * 10000) 
+  filter(case_zip %in% pop_data$ZipCode) %>% #only keep cases that are included in the shapefile
   
-#join spatial data and epi data 
+  drop_na(pos_sampledt_FALSE) %>% #remove samples that do not have a valid date of confirmation
+  
+  group_by(ISOweek = ISOweek::ISOweek(floor_date(pos_sampledt_FALSE, "weeks")), 
+           #grouping by ISOweek but also by month to later facet maps on months
+           month = month(floor_date(pos_sampledt_FALSE, "month"), label = T), case_zip)  %>% 
+  
+  count() %>%
+  
+  #format the month var for later
+  mutate(month = paste0(str_remove(ISOweek, "-W.*"), "-", month)) %>% 
+  
+  ungroup() %>% 
+
+  #add pop of each ZIP
+left_join(., pop_data, by= c("case_zip" = "ZipCode")) %>% 
+
+#remove Zip code where pop is <0
+filter(Population !=0)
+
+vector %>% filter(ZipCode == 30349)
+
+weekly_zip_cases %>% filter(case_zip == 30349)
+
+# -----------------------------------------------
+
+#2. Calculate AR for each week and Zip
+weekly_zip_ar <- attack_rate(cases = weekly_zip_cases$n, 
+            population = weekly_zip_cases$Population, 
+            multiplier = 10000, 
+            mergeCI = T) %>% 
+  
+  bind_cols(select(weekly_zip_cases, ISOweek, case_zip, month)) %>% #add ISOweek - Zip variable -  month
+  
+    #set as first var
+    relocate(c(ISOweek, month, case_zip), 1) 
+
+# -----------------------------------------------------------------------
+#3. subset small regions 
+
+#see distribution of AR - massive outliers that dilute visualisations (AR > 300) - located in  THREE regions with SMALL populations
+hist(weekly_zip_ar$ar, breaks = 1000)
+filter(weekly_zip_ar, ar > 300) %>% count(case_zip, population)
+
+#create a subset using population size <1000
+weekly_zip_ar_small <- weekly_zip_ar %>% filter(population<1000)
+
+#remove them from the main dataset 
+weekly_zip_ar_big <- weekly_zip_ar %>% filter(!(case_zip %in% weekly_zip_ar_small$case_zip ))
 
 
+#----------------------------------------------------------------------
+#4. Categorisation of ARs
+
+## creates breaks for categories - main breaks and then breaks for small regions (outliers) -- not sure this is ideal but trying to get best nuances for visualisation
+
+breaks <- as.integer(c(0, find_breaks(max(weekly_zip_ar_big$ar, na.rm=T), breaks = 5, snap = 5)))
+
+breaks_small <- as.integer(c(0, find_breaks(max(weekly_zip_ar_small$ar, na.rm=T), breaks = 5, snap = 10)))
+
+#categorize AR - main
+weekly_zip_ar_big <- weekly_zip_ar_big %>% mutate(ar_cat = age_categories(ar, breaks))
+
+#categorize AR - small regions
+weekly_zip_ar_small <- weekly_zip_ar_small %>% mutate(ar_cat = age_categories(ar, breaks_small))
+
+# -----------------------------------------------------------------------
+#5. Geo-referencing the AR table using the geometry of shapefile - in vector
+
+#add geometry to AR per zip codes 
+weekly_zip_ar_sf_big <- left_join(weekly_zip_ar_big, select(vector, ZipCode, geometry), by = c("case_zip" = "ZipCode")) %>% 
+  
+  st_as_sf()
+
+weekly_zip_ar_sf_small <- left_join(weekly_zip_ar_small, select(vector, ZipCode, geometry), by = c("case_zip" = "ZipCode")) %>% 
+  
+  st_as_sf()
+```
+ 
+#### Peak of Outbreak
+<center>
+```{r chloropleth peak}
+#get peak of outbreak
+peak <- date2week(find_peak(inci), floor_day = T)
+
+#define palette 
+pal <- colorFactor(palette = c("#94d2bd", 
+                               "#ffe169", 
+                               "#edc531", 
+                               "#e85d04", 
+                               "#dc2f02", 
+                               "#bb3e03"), 
+                    level = weekly_zip_ar_big$ar_cat, 
+                    ordered = T)
+
+
+
+#create Labels in HTML for hovering on map 
+weekly_zip_ar_sf_big$labels <- paste0(weekly_zip_ar_sf_big$ISOweek, "<br>ZIP: <b>", weekly_zip_ar_sf_big$case_zip, "<br>", "Attack Rate: </b>", round(digits = 2, weekly_zip_ar_sf_big$ar), " per 10 000<br> <b>Population:</b> ", weekly_zip_ar_sf_big$population) %>% lapply(htmltools::HTML)
+
+
+# map using leaflet 
+leaflet(data = filter(filter(weekly_zip_ar_sf_big), ISOweek == peak), 
+        
+        options = leafletOptions(dragging =F, 
+                                 minZoom = 9.5, 
+                                 maxZoom = 9.5, 
+                                 zoomControl = F)) %>% 
+  
+  addPolygons(fillColor = ~pal(ar_cat),
+              weight  = 0.4,
+              color = "black", 
+              highlightOptions = highlightOptions(weight = 4, 
+                                                  color = "red", 
+                                                  bringToFront = T, 
+                                                  opacity = .5), 
+              label = ~labels) %>% 
+  
+  addLegend(pal = pal, values = ~ar_cat, 
+            title = "Attack Rate<br><span style='font-size:10px;'>per 10 000") %>% 
+  
+  addControl(paste0(html = "<span style ='font-size:12px;color:#34495E;'>Chloropleth map of Fulton county at peak of the outbreak: <b>", peak, "</b></span><br><span style ='font-size:11px;color:#34495E;'>regions with more than 1000 habitants"))
+
+```
+</center>
+
+<hr>
+
+Below are mapped the smaller regions of Fulton county (<1000 habitants) which AR are really important (mean: `r round(digits = 2, mean(weekly_zip_ar_sf_small$ar))`) due to small size populations, mean`r round(digits = 2, mean(weekly_zip_ar_sf_small$population))`. This was done to allow a more nuanced mapping of other bigger regions by removing outliers. 
+
+<hr>
+
+<center>
+```{r chloropleth peak small regions}
+
+#I do this graph otherwise these regions make the distribution of AR extremely righ skewed and visaulisation is really hard on main graph due to massive outliers
+
+#define palette 
+pal_small <- colorFactor(palette = c( 
+                               "#edc531", 
+                               "#e85d04", 
+                               "#dc2f02", 
+                               "#bb3e03"), 
+                    level = weekly_zip_ar_sf_small$ar_cat, 
+                    ordered = T)
+
+#create Labels in HTML for hovering on map 
+weekly_zip_ar_sf_small$labels <- paste0(weekly_zip_ar_sf_small$ISOweek, "<br>ZIP: <b>", weekly_zip_ar_sf_small$case_zip, "<br>", "Attack Rate: </b>", round(digits = 2, weekly_zip_ar_sf_small$ar), " per 10 000<br> <b>Population:</b> ", weekly_zip_ar_sf_small$population) %>% lapply(htmltools::HTML)
+
+
+# map using leaflet 
+leaflet(data = filter(filter(weekly_zip_ar_sf_small), ISOweek == peak), 
+        
+        options = leafletOptions(dragging =F, 
+                                 minZoom = 9.5, 
+                                 maxZoom = 9.5, 
+                                 zoomControl = F)) %>% 
+  
+  addPolygons(fillColor = ~pal_small(ar_cat),
+              weight  = 1.3,
+              color = "black", 
+              highlightOptions = highlightOptions(weight = 4, 
+                                                  color = "red", 
+                                                  bringToFront = T, 
+                                                  opacity = .5), 
+              label = ~labels) %>% 
+  
+  addLegend(pal = pal_small, values = ~ar_cat, 
+            title = "Attack Rate<br><span style='font-size:10px;'>per 10 000") %>% 
+  
+  addControl(paste0(html = "<span style ='font-size:12px;color:#34495E;'>Chloropleth map of Fulton county at peak of the outbreak: <b>", peak, "</b></span><br><span style ='font-size:11px;color:#34495E;'>regions with less than 1000 habitants"))
+
+```
+</center>
+
+At the peak of the outbreak: **`r peak`**, the region with the greatest Attack rate was **`r filter(filter(weekly_zip_ar, ISOweek == peak), ar == max(ar))$case_zip` ** with an Attack rate of `r round(digits = 2, filter(filter(weekly_zip_ar, ISOweek == peak), ar == max(ar))$ar)` `r filter(filter(weekly_zip_ar, ISOweek == peak), ar == max(ar))$ci` per 10 000
+
+
+#### Chloropleth maps per week and Months
+
+Maps of big regions of Fulton county by Week of Outbreak. 
+
+```{r chloropleth for loop}
+#create a function that filters data on month and then plot a chloropleth 
+month_week_chloro <- function(data_ar, year_month){
+  
+  ggplot() +
+  
+  geom_sf(data = filter(data_ar, month == year_month), 
+          
+          aes(fill = ar_cat), 
+          alpha = .5, 
+          color = "black", 
+          size=.1) +
+  
+  scale_fill_manual(values = c("#94d2bd", 
+                               "#ffe169", 
+                               "#edc531", 
+                               "#e85d04", 
+                               "#dc2f02", 
+                               "#bb3e03")) +
+  
+  ggtitle(year_month) +
+  
+  facet_wrap (~ISOweek, nrow = 1) +
+  
+  theme(panel.background = element_blank(), 
+          plot.title = element_text(face = "bold"),
+          axis.text = element_blank(), 
+          axis.ticks = element_blank(), 
+          strip.text = element_text(face="bold"), 
+          strip.background = element_rect(color="black", fill="white"), 
+          panel.border = element_blank(), 
+          axis.title= element_blank(), 
+          legend.key = element_blank())
+  
+}
+
+#for loop the function to create all chloropleth subsetted by month
+for (time in(unique(weekly_zip_ar_sf_big$month))) {
+  
+print(month_week_chloro(weekly_zip_ar_sf_big, year_month = time) )
+  
+  
+}
 
 
 ```
+
+
+
+
+
+
+
+
+
