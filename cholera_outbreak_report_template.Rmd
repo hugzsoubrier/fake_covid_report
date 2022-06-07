@@ -2225,9 +2225,7 @@ for (week in unique(cases$epiweek)) {
     ## add labels to axes and below chart
     labs(x = "Region", y = "AR (per 10,000)") +  
     epicurve_theme
-  
-  
-  
+
   ## combine the barplot and map plot into one with patchwork and add a title
   ## in the top-left corner and a caption in the bottom-right
   print(
