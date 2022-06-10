@@ -1,0 +1,1298 @@
+---
+title: "Epidemiological Report - COVID-19"
+author: "Hugo Soubrier"
+date: "09/06/2022"
+output: 
+  html_document:
+    keep_md: true
+    toc: true
+    toc_float: true
+    toc_depth: 5
+--- 
+
+```{r set up, include = F}
+
+knitr::opts_chunk$set(echo = FALSE,       
+                      error = TRUE,
+                      message = FALSE, 
+                      warning = F)
+
+```
+
+```{r library loading}
+#spatial analysis 
+library(sf)
+library(ggsn)
+library(raster)
+library(leaflet)
+
+#epidemiological analysis 
+library(ISOweek)
+library(sitrep)
+library(epikit)
+library(incidence)
+library(linelist)
+library(lubridate)
+
+#visualisation
+library(highcharter)
+library(kableExtra)
+library(knitr)
+library(ggplot2)
+
+#data science
+library(rio)
+library(here)
+library(skimr)
+library(magrittr)
+library(utils)
+library(aweek)
+library(naniar)
+library(janitor)
+library(tidyselect)
+library(tidyverse)
+
+```
+
+## **Introduction** 
+
+```{r data loading & cleaning,}
+#read data
+data <- import(here("data", "covid_example_data.xlsx"))
+
+# set data classes -----------------------------------
+
+#create vector for the factors variables
+fct_vars <- data %>% select(contains("sym"), #select all symptoms var
+                            -sym_startdt_FALSE, #exclude the symptoms date var 
+                            - sym_resolveddt_FALSE, #exclude the symptoms resolved date var 
+                            case_gender, 
+                            case_race, 
+                            case_eth, 
+                            hospitalized, 
+                            died, 
+                            died_covid, 
+                            confirmed_case, 
+                            covid_dx) %>% names()
+
+#create vector for the date variables
+date_vars <- data %>% select(case_dob_FALSE, contains("dt")) %>% names()
+
+#create vector for numeric variables
+numeric_vars <- data %>% select(case_zip, case_age, latitude_JITT, longitude_JITT) %>% names()
+
+#create vector for character variables
+character_vars <- data %>% select(PID) %>% names()
+
+
+#apply data class to each vectors -
+clean_data <- data %>% mutate(across(fct_vars, as_factor),
+                across(date_vars, as_date), 
+                across(numeric_vars, as.numeric), 
+                across(character_vars, as.character))
+
+# Tidy data -------------------
+#create vector of var that need cleaning 
+needtidy_vars <- clean_data %>% select(where(is.factor)) %>% colnames()
+
+# use linelist::clean_data on it 
+clean_data[needtidy_vars] <- clean_data %>% select(all_of(needtidy_vars)) %>% clean_data()
+
+#Age 
+#make NA all obs that have an age < 0
+clean_data <- clean_data %>% mutate(case_age = ifelse(case_age<0, NA, case_age))
+
+```
+
+```{r spatial data loading, include = F}
+#read spatial data and make the ZipCode variable the same type as the case_zip in the Epi data for joining - numeric
+vector <- read_sf("data/vectors/FultonCountyZipCodes.shp") %>% 
+  mutate(ZipCode = as.numeric(ZipCode))
+
+#set the CRS to 4326 - WGS 1984
+vector <- st_transform(vector, 4326)
+
+#extract population data to perform ARs - remove geometry for now
+pop_data <- vector %>% 
+  dplyr::select(ZipCode, Population) %>% 
+  st_drop_geometry()
+
+#County 30331 is duplicated in the shapefile - need to remove one otherwise will be dupicated on map 
+pop_data %>% get_dupes()
+
+pop_data <- pop_data %>% filter(!duplicated(ZipCode))
+
+```
+
+```{r data recoding & classifying, include = F}
+# create age_cat var 
+clean_data <- clean_data %>%  mutate(age_cat = case_when( case_age < 10 ~ "< 10", 
+                                                between(case_age, 10, 20) ~ "10 - 20", 
+                                                between(case_age, 20, 30) ~ "20 - 30", 
+                                                between(case_age, 30, 40) ~ "30 - 40", 
+                                                between(case_age, 40, 50) ~ "40 - 50", 
+                                                between(case_age, 50, 60) ~ "50 - 60", 
+                                                between(case_age, 60, 70) ~ "60 - 70", 
+                                                case_age > 70 ~ "70 +"), 
+                                     age_cat = if_else(is.na(age_cat), "unknown", age_cat), 
+                                     age_cat = fct_relevel(age_cat, c("< 10", "10 - 20", "20 - 30", "30 - 40", "40 - 50", "50 - 60", "60 - 70", "70 +"))) %>% 
+  
+  relocate(age_cat, .after = case_age)
+
+#recode all variables - if NA then set as unknown  
+
+clean_data <- clean_data %>% mutate(across(fct_vars, as.character),
+                      across(fct_vars, ~if_else(is.na(.x), "unknown", .x)),
+                      across(fct_vars, as_factor))
+
+#recode specific variables
+
+clean_data <- clean_data %>% 
+  mutate( hospitalized = recode(hospitalized, 
+                                "yes" = "hospitalised",
+                                "no" = "not hospitalised"))
+
+clean_data <- clean_data %>% 
+  mutate(died_covid = recode( died_covid, 
+                              "under_review" = "under review"))
+
+
+sym_vars <- clean_data %>% select(contains("sym_"), 
+                                  -contains("dt_"), 
+                                  -sym_resolved) %>% names()
+
+clean_data <- clean_data %>% 
+  mutate( across(sym_vars, ~fct_recode(.x, "unknown" = "unk")))
+
+```
+
+```{r incidence calculation, include = F}
+#calculate incidence and get ISO-weeks for the outbreak for later uses
+inci <- incidence(clean_data$pos_sampledt_FALSE, interval = "monday week")
+
+```
+
+This document is a fake epidemiological report using data provided by the [Applied Epi](https://appliedepi.org) group using a fake COVID linelist ([data available on Github](https://github.com/appliedepi/epiRhandbook_eng)). 
+
+I have used these data to create various descriptive analysis. Most of the work here is inspired from the great [Epidemiologist R handbook](https://www.epirhandbook.com/en/), but also from other resources that I have used to learn R. I use pipes and all of the tidyverse has I have learned in: [R for Data Science](https://r4ds.had.co.nz/index.html) and other resources available on [Rstudio website](https://www.rstudio.com/resources/books/). 
+
+For data visualisation I have decided to focuss on interactive graphs using the ``highcharter`` package a wrapper for the [highchart library](https://jkunst.com/highcharter/index.html). I have been working with highcharter for some time now but I used it as an opportunity to learn more, and apply it to a real life scenarios. I do really enjoy the adds-on of interactivity in data analysis.
+
+For Epidemiological analysis/description I have used what I knew from the various packages regarding epi: 
+``linelist``, ``epikit``, ``incidence``, ``sitrep`` ... 
+
+For spatial analysis, I have chosen to get out of ``ggplot``, or ``tmap`` which I have used a lot, to focuss on ``leaflet`` as it was once more an occasion to use interactivity in real life scenario for data visualisation and I think this is very powerful. 
+
+This *report* is more like a aggregate of data analysis and visualisation, but I have tried to stick to an epidemiologically sound structure of **PERSON**, **TIME** & **PLACE**. 
+
+<hr>
+
+## **Overview** 
+Between the  `r min(inci$dates)` and the `r max(inci$dates)` (a period `r inci$timespan ` days) a total of `r inci$n` cases have been identified, of which `r fmt_count(clean_data, covid_dx == "confirmed")` are **confirmed** cases. 
+
+- In Fulton County, and over this period, the **attack rate** is of `r fmt_ci_df(attack_rate(inci$n, population = sum(pop_data$Population), multiplier = 10000), percent = F)` per 10 000.
+
+- Amongst all cases of known hospitalisation status, at least `r fmt_count(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised")` have been **hospitalised**, but `r fmt_count(clean_data, hospitalized == "unknown")` still have an **unknown** status 
+
+- Using only cases with known outcome, the **Case Fatality Ratio** is of `r fmt_ci_df(case_fatality_rate_df(filter(clean_data, !str_detect(died_covid, "unknown|under review")), died_covid == "yes"))`, but importantly, `r fmt_count(clean_data, died_covid == "under review")` cases are under review, and `r fmt_count(clean_data, died_covid == "unknown")` of cases missing outcome status. 
+
+## **Person** 
+
+Since the start of the outbreak there was,  `r fmt_count(clean_data, case_gender == "female")` female  cases and `r fmt_count(clean_data, case_gender == "male")` male cases. 
+
+The Age of cases ranges from `r min(clean_data$case_age, na.rm=T) ` to `r max(clean_data$case_age, na.rm=T)`, with Age group `r slice_tail(arrange(tabyl(clean_data$age_cat),n))[1]` the most represented, with 
+`r slice_tail(arrange(tabyl(clean_data$age_cat),n))[1,2]` (`r round(digits = 2, slice_tail(arrange(tabyl(clean_data$age_cat),n))[1,3]*100)`%) cases. 
+
+
+### Missing data
+
+There is `r fmt_count(clean_data, case_gender == "unknown")` cases with missing data on Sex, and `r fmt_count(clean_data, age_cat == "unknown")` cases with missing data on Age. 
+
+
+### Age and Sex distributions
+
+```{r Sex vs age group distribution }
+
+clean_data %>% 
+  
+  tab_linelist(age_cat, strata = case_gender) %>% 
+  
+  select(-variable) %>% 
+  rename("Age group" = value) %>% 
+  rename_redundant("%" = proportion) %>% 
+  augment_redundant("cases (n)" = "n$") %>% 
+  
+  #style kable
+  kable(caption = "Distribution of cases per <b>Age groups</b> and <b>case gender</b>",
+        align = "c",
+        digits = 2) %>%
+  
+  kable_styling("hover", 
+                full_width = F) 
+
+```
+
+
+#### Age-Sex pyramid
+
+<center>
+```{r age_pyramid, dpi = 250}
+
+clean_data %>% 
+  
+  mutate(case_gender = fct_recode(case_gender, 
+                                               NULL = "unknown")) %>%
+  
+ plot_age_pyramid(.,
+                  age_group = "age_cat", 
+                  split_by = "case_gender") +
+
+  labs(y = "Cases (n)", x = "Age group") +
+  
+  theme(legend.title = element_blank(),
+        text = element_text(size = 12)
+       )
+
+```
+</center>
+
+### Hospitalisations 
+
+Overall Hospitalisation rate is of `r fmt_ci_df(case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), hospitalized == "hospitalised"))`, but `r fmt_count(clean_data, hospitalized == "unknown")` still have an **unknown** status. 
+
+#### Age group 
+
+```{r hosp rate per age_cat computation}
+#calculate hosp rate per age_group - not merging CI for later use in fmt_ci_df()
+
+hosp_rate_age_cat <- case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), 
+                      hospitalized == "hospitalised", 
+                      group = age_cat, 
+                      mergeCI = F) %>% 
+  #rename cols
+  rename("hospitalisations" = deaths, 
+         "hosp_rate" = cfr) 
+```
+
+The age group, **`r slice_tail(arrange(hosp_rate_age_cat, hosp_rate))$age_cat`** had the greatest hospitalisation rate of `r fmt_ci_df(slice_tail(arrange(hosp_rate_age_cat, hosp_rate)), e=4, l=5, u=6)`. 
+
+```{r hosp rates per age_group table}
+
+#show hosp rate per age_cat table
+hosp_rate_age_cat %>% 
+  
+  #rename for table
+  rename("Hosp. rate" = hosp_rate, 
+         "Age groups" = age_cat) %>% 
+  
+  #merge CI now
+  mutate("95%-CI" = paste0("(",round(digits = 2, lower), "-", round(digits = 2,upper),")")) %>% 
+  
+  select(-c(lower, upper)) %>% 
+ 
+  #display kable()
+   kable(caption = "Hospitalisation rates per <b>Age groups</b>",
+        align = "c",
+        digits = 2) %>%
+  
+  kable_styling("hover", 
+                full_width = F) 
+
+```
+
+#### Sex
+
+```{r hosp rate per sex}
+#same logic as hosp rate per age cat - no merging CI for later use in fmt_ci_df()
+hosp_rate_sex <- case_fatality_rate_df(filter(clean_data, hospitalized !="unknown"), 
+                      hospitalized == "hospitalised", 
+                      group = case_gender, 
+                      mergeCI = F) %>% 
+  
+  #rename
+  rename("hospitalisations" = deaths, 
+         "hosp_rate" = cfr, 
+         "Sex" = case_gender)
+```
+
+Hopsitalisations rates remained similar between **Male**  ( `r fmt_ci_df(filter(hosp_rate_sex, Sex == "male"), 4, 5, 6 )` ) and **Female** ( `r fmt_ci_df(filter(hosp_rate_sex, Sex == "male"), 4, 5, 6 )` ). 
+
+```{r hospitalisation rates per Sex}
+
+#display table
+hosp_rate_sex %>% 
+  
+  #merge ci
+  mutate("95%-CI" = paste0("(", round(digits = 2, lower), "-", round(digits = 2, upper), ")")) %>% 
+  select(-c(lower, upper)) %>% 
+  
+  rename("Hosp. rate" = hosp_rate) %>% 
+ 
+   kable(caption = "Hospitalisation rates per <b> Sex </b>",
+        align = "c",
+        digits = 2) %>%
+  
+  kable_styling("hover", 
+                full_width = F) 
+```
+
+### COVID Deaths 
+
+Using only cases with known outcome, the Overall CFR is of `r fmt_ci_df(case_fatality_rate_df(filter(clean_data, !str_detect(died_covid, "unknown|under review")), died_covid == "yes"))`. 
+
+Importantly, `r fmt_count(clean_data, died_covid == "under review")` cases are **under review**, while `r fmt_count(clean_data, died_covid == "unknown")` have unknown **outcome**. 
+
+#### Age group 
+```{r CFR per age group}
+age_cat_cfr <- clean_data %>% 
+  
+    #filter out all cases with no outcome info
+  filter(!str_detect(died_covid, "unknown|under review")) %>% 
+  
+  #calculate CFR per each group - do not merge CI here to be used later in inline function
+  case_fatality_rate_df(died_covid == "yes",
+                        group= age_cat,
+                        mergeCI = F)
+  #rename
+age_cat_cfr %>% 
+  
+  #merge CI 
+  mutate(lower = round(digits = 2, lower), 
+         upper = round(digits = 2, upper),
+    "95%-CI" = paste0("(", lower, "-", upper, ")")) %>% 
+  
+  select(-c(lower, upper)) %>% 
+  
+  
+  rename("Age groups" = age_cat, 
+         "CFR" = cfr) %>% 
+  
+  #style kable
+  kable(caption = "Distribution of COVID <b>CFR</b> per <b>Age group</b>",
+        align = "c",
+        digits = 2) %>%
+  
+  kable_styling("hover", 
+                full_width = F) 
+```
+
+**`r filter(filter(age_cat_cfr, age_cat !="unknown"), cfr == min(age_cat_cfr$cfr))$age_cat`** was the age group with the lowest CFR: `r fmt_ci_df(filter(filter(age_cat_cfr, age_cat !="unknown"), cfr == min(age_cat_cfr$cfr)), e = 4, l =5, u = 6)`. While **`r filter(filter(age_cat_cfr, age_cat !="unknown"), cfr == max(age_cat_cfr$cfr))$age_cat`** was the age group with the greatest CFR: `r fmt_ci_df(filter(filter(age_cat_cfr, age_cat !="unknown"), cfr == max(age_cat_cfr$cfr)), e = 4, l =5, u = 6) `
+
+#### Sex 
+
+```{r CFR per sex }
+
+clean_data %>% 
+  #filter out all cases with no outcome info
+  filter(!str_detect(died_covid, "unknown|under review")) %>% 
+  
+  #calculate CFR per group
+  case_fatality_rate_df(
+                        died_covid == "yes",
+                        group= case_gender,
+                        mergeCI = T) %>% 
+  #rename vars
+  rename("Sex" = case_gender, 
+         "CFR" = cfr, 
+         "95%-CI" = ci) %>% 
+  
+  #style kable
+  kable(caption = "Distribution of COVID <b>CFR</b> per <b>Sex</b>",
+        align = "c",
+        digits = 2) %>%
+  
+  kable_styling("hover", 
+                full_width = F) 
+```
+
+### Symptoms distribution
+
+Amongst all cases, symptoms were distributed as follow:
+
+```{r table symptoms distribution}
+clean_data %>% 
+  tab_linelist(sym_vars) %>% 
+  
+  select(-variable) %>% 
+  
+  #style kable
+  kable(caption = "Distribution of <b>symptoms</b>",
+        align = "c",
+        digits = 2)  %>% 
+  
+   kableExtra::group_rows(., group_label = "Fever", start_row = 1, end_row = 3, label_row_css = "font-size:13px;") %>% 
+  
+  #Create group rows by specifying start_row and end_row. 
+  kableExtra::group_rows(., "Subjective Fever", 4, 6, label_row_css = "font-size:12px;") %>%
+  
+  kableExtra::group_rows(., "Myalgia", 7, 9, label_row_css = "font-size:12px;") %>% 
+  
+  kableExtra::group_rows(., "Loss of Taste & Smell", 10, 12, label_row_css = "font-size:12px;") %>% 
+  
+  kableExtra::group_rows(., "Sore throat", 13, 15, label_row_css = "font-size:12px;") %>% 
+  
+  kableExtra::group_rows(., "Cough", 16, 18, label_row_css = "font-size:12px;") %>% 
+  
+  kableExtra::group_rows(., "Headache", 19, 21, label_row_css = "font-size:12px;") %>% 
+  
+  kable_styling("hover", 
+                full_width = F) %>% 
+  
+  column_spec(1, width = "175px") %>% 
+  column_spec(2, width = "175px") %>% 
+  column_spec(3, width = "175px")
+
+```
+
+And this was related to one another as follow: 
+
+```{r dependency wheel preparation data, include = F}
+
+#the aim is to create a circular dependency wheel to visualise how many cases are sharing a combination of two symptoms. 
+
+#define vector with all sym_vars names
+
+sym_var <- clean_data %>% select(contains("sym"), 
+                -contains("dt_"), 
+                -sym_resolved) %>% names()
+
+
+#1. create dummy data from subset of big data
+dummy_data <- clean_data %>% 
+  
+  #make unknown back to NA
+ mutate(across(sym_var, ~na_if(.x, "unknown"))) %>% 
+  
+  #select only sym vars
+  select(sym_var) %>% 
+  
+  #recode all var from yes to 1
+  mutate(across(.cols = sym_var, ~ifelse(.x == "yes", 1, 0)))
+
+
+#2. use a for loop to generate a table(from, to, weight) with all combination of symptoms - excluding identical (sym_fever vs sym_fever) and reverse combination(sym_fever vs sym_cough & sym_cough vs sym_fever). 
+
+
+#create an empty tibble
+sym_table <- tibble()
+
+#fill empty table of all combination of symptoms using for loop
+for (var1 in c(names(dummy_data))) {
+  
+  for(var2 in c(names(dummy_data))) { 
+    
+    #if both var are equals skip this itteration
+    if (var1 == var2){
+      
+      next 
+      
+    } else {
+      
+      #else create a new row
+      new_row <- tibble(from = var1, to = var2, weight = NA) }
+    
+    #if this row contains inverted values from a previous row then skip iteration 
+    if(new_row$from %in% sym_table$to & new_row$to %in% sym_table$from) {
+      
+      next
+      
+    } else{
+      
+      #else bind new_row to the table
+      sym_table <- rbind(sym_table, new_row)
+      
+    }
+    
+  }
+}
+
+
+#3. create a function that computes the N of cases with one symptoms vs another in dummy_data
+
+weight_var1_var2 <- function(var1, var2){
+  
+  #make var1 and var2 usable as column names
+  var1 <- sym(var1)
+  var2 <- sym(var2)
+  
+  n <- dummy_data %>% 
+    #remove NAs for these symptoms
+    drop_na(!!var1, !!var2) %>% 
+    #only keep cases that got symptom one and also symptom 2
+    filter(!!var1 == 1 & !!var2 == 1) %>% 
+    
+    #count number of cases
+    count()
+  
+  return(n$n)
+}
+
+#4. vectorize the function to use it in mutate
+weight_var1_var2_V <- Vectorize(weight_var1_var2)
+
+
+#5. apply our weight function to all combination of the table 
+sym_table <- sym_table %>% 
+  mutate(weight = weight_var1_var2_V(from, to))
+
+#6. Add two vars that summarise the N for each FROM and TWO levels, and then the %t hat represent the weight for FROM and TWO levels --- this will be used later for the graph tooltip
+
+#create a small function that removes NA of var and calculates counts of cases with the symptom in dummy_data from a column name
+n_sym <- function(var){
+  
+  var <- sym(var)
+  
+  n <- dummy_data %>% 
+    
+    filter(!is.na(!!var), 
+           !!var ==1) %>% 
+    
+    count()
+  
+  print(n$n)
+}
+#vectorize the function
+n_sym_V <- Vectorize(n_sym, vectorize.args = "var")
+
+#apply function and create vars
+sym_table <- sym_table %>% 
+  mutate(N_from = n_sym_V(var = from), 
+         percent_from = round(digits = 2, weight/N_from * 100), 
+         N_to = n_sym_V(var = to), 
+         percent_to = round(digits = 2, weight/N_to * 100))
+  
+#7. Recode 
+
+var <- select(sym_table, to, from) %>% names()
+
+sym_table <-  sym_table %>% mutate(across(var, ~ case_when(.x == "sym_fever" ~ "Fever", 
+                                                      .x == "sym_subjfever" ~"Subjective Fever", 
+                                                      .x == "sym_myalgia" ~ "Myalgia", 
+                                                      .x == "sym_losstastesmell" ~ "Loss of Taste & Smell",
+                                                      .x == "sym_sorethroat" ~ "Sore throat", 
+                                                      .x == "sym_cough" ~ "Cough", 
+                                                      .x == "sym_headache" ~ "Headache")))
+
+```
+
+
+```{r dependency wheel symptoms}
+# Use the table to plot the wheel using highcharter 
+#plot
+highchart() %>% 
+  
+  hc_add_series(data = sym_table, type = "dependencywheel", name = "Symptoms") %>% 
+  
+  hc_title(text = paste0("Number of cases sharing two symptoms"), 
+           align = "left", 
+           style = list(useHTML =T, color = "#34495E", fontSize= 13)) %>%
+  
+  hc_colors(c("#335c67", "#fff3b0", "#e09f3e", "#9e2a2b", "#540b0e", "#e0fbfc", "#f19c79")) %>% 
+  
+  hc_tooltip(useHTML = T,
+             
+             pointFormat = "N cases sharing symptoms : <b>{point.weight}</b><br>% of cases with <b>{point.fromNode.name}</b>: {point.percent_from} %<br>% of cases with <b>{point.toNode.name}</b>: {point.percent_to} %", 
+             
+             nodeFormat = "<b>{point.name}</b>") %>% 
+  
+  hc_plotOptions(dependencywheel = list(
+    
+    dataLabels = list(
+      color = "black",
+      distance = 13,
+      textPath = list(enabled = T, 
+                      attributes = list(dy=4))
+      )))
+
+```
+
+
+## **Time**
+```{r date handling, eval = T, echo = F, include = F, warning = F, message = F}
+
+# check the symptoms onset dates - many dates are missed typed 
+clean_data %>% group_by(floor_date(sym_startdt_FALSE, "year")) %>% count()
+
+#clean the symptoms onset dates 
+#make NA all dates that are prior to Nov 2019 (~start of COVID outbreak) & make NA all date that are past the current date
+clean_data <-  clean_data %>%
+  mutate(sym_startdt_clean =  dplyr::if_else(sym_startdt_FALSE > as.Date("2019-11-01"), 
+                                             
+                                             if_else(sym_startdt_FALSE > Sys.Date(), 
+                                                     as.Date(NA), 
+                                                     sym_startdt_FALSE),
+                                             
+                                             as.Date(NA))) %>% 
+  
+  relocate(sym_startdt_clean, .after = sym_startdt_FALSE)
+
+#check the confirmation dates - 122 missing dates but no out of boundaries
+clean_data %>% group_by(floor_date(pos_sampledt_FALSE, "year")) %>% count()
+```
+
+### Main Epicurve
+The peak of the outbreak was reached on week  **`r date2week(find_peak(inci), floor_day = T)`**, with a total of `r max(inci$count)` cases.  `r nrow(filter(clean_data, is.na(pos_sampledt_FALSE)))` cases had missing dates, and they were excluded from the epicurves.
+
+<center>
+```{r main epicurve, echo = F}
+#this is the main Epicurve - 
+clean_data %>%
+  
+  #group by week and count
+   group_by(weeks = ISOweek::ISOweek(floor_date(pos_sampledt_FALSE, "week", 
+                                                    week_start = getOption("lubridate.week.start",1))))  %>% 
+
+  
+  count() %>%   
+  
+  #remove cases with no dates - 
+  drop_na(weeks) %>% 
+  
+  #plot with highcharter
+  hchart("column", hcaes(x = weeks, y = 'n')) %>% 
+  
+  hc_colors("#F4D497") %>% 
+  
+  hc_plotOptions(column = list(cropThreshold = 1000), 
+                 series = list(groupPadding = 0, 
+                               pointPadding = -0)) %>% 
+  
+  
+  hc_xAxis(categories = unique(.$weeks)) %>% 
+  
+  hc_title(text = paste0("Cases by weeks of confirmation"), 
+           align = "left", 
+           style = list(useHTML =T, color = "#34495E", fontSize= 13)) %>%
+  
+  hc_tooltip(useHTML = T,
+             formatter = JS("function(){
+     outHTML =  '<b>' + this.point.weeks + '</b>' + '<br> <b> N cases: </b>' + this.point.n + '<br> <b>'
+     return(outHTML)
+     }")) %>% 
+  
+  hc_navigator( enabled = TRUE, 
+                xAxis = list(
+                  labels = list(
+                    enabled = F
+                  )
+                )
+                )
+
+```
+</center>
+
+### Epicurves by groups
+```{r epicurve function, include = F}
+
+#define a function to create an interactive Epicurve where you can specify a grouping variable
+epicurve <- function(clean_data, grouping_var, var_title) {
+  
+  #compute sum for each weeks
+  week_sum <- clean_data %>%
+  
+   group_by(weeks = floor_date(pos_sampledt_FALSE, "week", 
+                               week_start = getOption("lubridate.week.start",1))) %>% 
+  
+  count(name = "N") %>% mutate(isoweeks = ISOweek::ISOweek(weeks)) %>% relocate(isoweeks, .after = weeks)
+
+clean_data %>%
+  
+   group_by(weeks = floor_date(pos_sampledt_FALSE, "week", 
+                               week_start = getOption("lubridate.week.start",1)), 
+            grouping_var) %>% 
+  
+  count(name = "n") %>% 
+  
+  left_join(., week_sum, by = "weeks") %>% 
+  
+  mutate(percent = round(digits = 2, n/N*100)) %>% 
+  
+  drop_na(weeks) %>% 
+  
+  hchart("column", hcaes(x = weeks, y = 'n', group = grouping_var), stacking = "normal") %>% 
+  
+  hc_plotOptions(column = list(cropThreshold = 1000), 
+                 series = list(groupPadding = 0, 
+                               pointPadding = -0)) %>% 
+  
+  
+  hc_xAxis(categories = unique(.$weeks)) %>% 
+  
+  hc_title(text = paste0("Cases by week of confirmation and <b>", var_title), 
+           align = "left", 
+           style = list(useHTML =T, color = "#34495E", fontSize= 13)) %>%
+    
+    hc_tooltip(useHTML = T,
+             formatter = JS(
+               "
+     function(){
+     outHTML =  '<b>' + this.point.isoweeks + '</b>' + '<br><b>' + this.point.grouping_var + '<br>N cases: </b>' + this.point.n + '<br> <b> % of weekly cases: </b>' +this.point.percent 
+     return(outHTML)
+     }
+     "))
+  
+}
+
+```
+
+<center>
+```{r groups epicurves, echo = F}
+
+hw_grid( 
+  
+  #Sex
+  epicurve(clean_data = clean_data, grouping_var = clean_data$case_gender, var_title= "Sex") %>%
+  
+  hc_colors(c("#D6F2FA", "#EAD6FA", "#F9EDC2")), 
+  
+  #Age group
+   epicurve(clean_data = clean_data, grouping_var = clean_data$age_cat, var_title= "Age categories") %>%
+  
+  hc_colors(c("#D5F5E3", "#ABEBC6", "#82E0AA", "#58D68D", "#2ECC71", "#239B56", "#1D8348", "#186A3B", "#17202A")), 
+   
+   #Diagnostic status - only one level but could be useful if suspected/probable cases added
+    epicurve(clean_data = clean_data, grouping_var = clean_data$covid_dx, var_title= "diagnostic status") %>%
+  
+    hc_colors(c("#D6F2FA", "#EAD6FA", "#F9EDC2")), 
+    
+  #Hospitalisations
+    epicurve(clean_data = clean_data, grouping_var = clean_data$hospitalized, var_title= "Hospitalisation status") %>%
+  
+    hc_colors(c("#A9DFBF", "#F5B7B1", "#F9EDC2" )) )
+```
+</center>
+
+### Weekly Attack Rates, Hospitalisation rates and CFR
+
+```{r compute weekly attack rate, Hosp. rate and CFR}
+
+#calculate N cases per weeks, required for attack_rate()
+weekly_cases <- clean_data %>% 
+  
+  drop_na(pos_sampledt_FALSE) %>% #remove samples that do not have a valid date of confirmation
+  
+  group_by(ISOweek = ISOweek::ISOweek(floor_date(pos_sampledt_FALSE, "weeks")))  %>% 
+  
+  count() %>% 
+  
+  #add pop data of Fulton county
+  mutate(population = sum(pop_data$Population))
+
+#AR
+weekly_ar <- attack_rate(weekly_cases$n, 
+              population = weekly_cases$population, 
+              mergeCI= F, 
+              multiplier = 10000) %>% 
+    
+    bind_cols(select(weekly_cases, ISOweek)) %>% #add ISOweek variable
+    #set as first var
+    relocate(ISOweek, 1) %>% 
+  
+  #change digits number for estimates and CI 
+  mutate(across(c(ar, lower, upper), ~round(.x, digits = 2)))
+  
+
+#weekly Hosp. rate - calculated using the case_fatality_rate()
+weekly_hosp_rate <- clean_data %>% 
+  
+  arrange(pos_sampledt_FALSE) %>% #arrange dates from earlier - latest
+  
+  mutate(ISOweek = as_factor(ISOweek(pos_sampledt_FALSE)))  %>% #create an ISOweek var for graph
+  
+  filter(hospitalized != "unknown") %>% #remove all not hospitalised
+
+case_fatality_rate_df(., #compute hospitalisation rates grouped by epiweeks 
+                      hospitalized == "hospitalised", 
+                      group = ISOweek, 
+                      mergeCI = F) %>% 
+  
+  #rename var accordingly
+  rename("hospitalisations" = deaths, 
+         "hosp_rate" = cfr) %>% 
+  
+  #change digits number for estimates and CI 
+  mutate(across(c(hosp_rate, lower, upper), ~round(.x, digits = 2)))
+
+
+#CFR - same logic as hospitalisation rates
+weekly_cfr <- clean_data %>% 
+  
+  arrange(pos_sampledt_FALSE) %>% 
+  
+  mutate(ISOweek = as_factor(ISOweek(pos_sampledt_FALSE)))  %>% 
+  
+  filter(!str_detect(died_covid, "unknown|under review")) %>% #remove all with unknown/under review 
+  
+  arrange(ISOweek) %>% 
+
+case_fatality_rate_df(., 
+                      died_covid == "yes", 
+                      group = ISOweek, 
+                      mergeCI = F) %>%
+  
+  #change digits number for estimates and CI 
+  mutate(across(c(cfr, lower, upper), ~round(.x, digits = 2)))
+
+```
+
+
+```{r AR, CFR, and hosp rate tables, eval = F}
+#weekly Tables for rates -- not evaluated as all info are on the plot 
+
+#weekly AR table
+ weekly_ar %>%  
+   
+   merge_ci_df(e = 4,
+               l = 5, 
+               u =6) %>% 
+   rename( "95%-CI" = ci, 
+           "AR per 10000" = ar ) %>% 
+   
+   kable(caption = "Attack Rates per <b>ISOweeks</b> of the outbreak",
+        align = "c",
+        digits = 3) %>%
+  
+  kable_styling("hover", 
+                full_width = F)
+
+
+#weekly Hospi. rate table 
+weekly_hosp_rate  %>%  
+  
+  merge_ci_df(e =4, 
+              l =5, 
+              u =6) %>% 
+  
+  rename("95%-CI" = ci, 
+         "Hosp. rate" = hosp_rate) %>% 
+  
+  
+  kable(caption = "Hospitalisation Rates per <b>ISOweeks</b> of the outbreak",
+        align = "c",
+        digits = 3) %>%
+  
+  kable_styling("hover", 
+                full_width = F)
+
+#weekly CFR table 
+weekly_cfr %>%  
+  
+  merge_ci_df(e =4, 
+              l =5, 
+              u =6 ) %>% 
+  
+  rename("95%-CI" = ci, 
+         "CFR" = cfr) %>% 
+  
+  kable(caption = "Case Fatality Rates per <b>ISOweeks</b> of the outbreak",
+        align = "c",
+        digits = 3) %>%
+  
+  kable_styling("hover", 
+                full_width = F)
+
+
+
+
+
+
+```
+
+<center>
+```{r rates graph}
+#plotting AR hosp rate and CFR on a graph with CIs
+
+highchart() %>% 
+  
+  #plot the AR 
+  hc_add_series(name = "Attack rate", 
+                data = weekly_ar, 
+                "line", 
+                hcaes(x = ISOweek, 
+                      y = ar), 
+                color = "#5496D9", 
+                fillOpacity= .8, 
+                marker = list(enabled = F, 
+                              radius = 2, 
+                              symbol = "circle"), 
+                linkedT0 = "AR 95%-CI") %>% 
+  #AR CI
+  hc_add_series(name = "AR 95%-CI",
+                type = "arearange",
+                data = weekly_ar,
+                hcaes(x = ISOweek, 
+                      low = weekly_ar$lower, 
+                      high = weekly_ar$upper ), 
+                linkedTo = "Attack rate", 
+                color = "#A9CDF1", 
+                fillOpacity= .2, 
+                marker = list(enabled = F, 
+                              radius = 2, 
+                              symbol = "circle"), 
+                lineWidth = 0) %>% 
+  
+  #Hosp.  rate
+  hc_add_series(name = "Hospitalisations rate", 
+                data = weekly_hosp_rate, 
+                "line", 
+                hcaes(x = ISOweek, 
+                      y = hosp_rate), 
+                color = "#EAD03C", 
+                fillOpacity= .8, 
+                marker = list(enabled = F, 
+                              radius = 2, 
+                              symbol = "circle")) %>% 
+  #Hosp rate - CI
+  hc_add_series(name = "Hosp.rate 95%-CI",
+                type = "arearange",
+                data = weekly_hosp_rate,
+                hcaes(x = ISOweek, 
+                      low = weekly_hosp_rate$lower, 
+                      high = weekly_hosp_rate$upper ), 
+                linkedTo = "Hospitalisation rate", 
+                color = "#DCD298", 
+                fillOpacity= .2, 
+                lineWidth = 0, 
+                marker = list(enabled = F, 
+                              radius = 2, 
+                              symbol = "circle")) %>% 
+  #CFR
+  hc_add_series(name = "CFR", 
+                data = weekly_cfr, 
+                "line", 
+                hcaes(x = ISOweek, 
+                      y = cfr), 
+                color = "#E84F4F", 
+                fillOpacity= .8, 
+                marker = list(enabled = F,
+                              radius = 2, 
+                              symbol = "circle")) %>% 
+  #CFR - CI
+  hc_add_series(name = "CFR 95%-CI",
+                type = "arearange",
+                data = weekly_cfr,
+                hcaes(x = ISOweek, 
+                      low = weekly_cfr$lower, 
+                      high = weekly_cfr$upper ), 
+                linkedTo = "CFR", 
+                lineWidth = 0,
+                color = "#F8C8C8", 
+                fillOpacity= .2, 
+                zIndex = 0, 
+                marker = list(enabled = F, 
+                              radius = 2, 
+                              symbol = "circle")) %>%
+  
+  hc_xAxis(categories = unique(weekly_ar$ISOweek)) %>% 
+  
+ hc_title(text = paste0("Attack Rate, Case Fatality Ratio and Hospitalisation rate by weeks of confirmation"), 
+           align = "left", 
+           style = list(useHTML =T, color = "#34495E", fontSize= 13)) %>% 
+  
+  hc_tooltip(shared = T,
+             crosshairs = T,
+             useHTML = T
+             )
+```
+</center>
+
+
+
+## **Place** 
+```{r spatial reference of clean_data, include = F}
+#make clean_data spatial referenced - drop NA in long and lat var - set crs as WGS 1984
+clean_data_sf <- clean_data %>% 
+  
+  drop_na(longitude_JITT, latitude_JITT) %>% 
+
+  st_as_sf(coords = c("longitude_JITT", "latitude_JITT"), crs = 4326) 
+
+#some cases have long and lat around 0 - probably typos need to be dealt with
+hist(clean_data$longitude_JITT)
+hist(clean_data$latitude_JITT)
+
+#only keep cases which are found within the vector dataset - perform a spatial filter
+clean_data_sf <- st_filter(clean_data_sf, vector)
+
+```
+
+### Cases map 
+
+Cases have been detected throughout Fulton county, especially in major cities.
+
+<center>
+```{r cases map, message = F, echo = F, dpi = 300}
+
+#display map of cases to identify potentially undersampled locations - not the case here 
+
+ggplot() +
+  
+  geom_sf(data = vector, fill = "#ffffff", col = "black", size = .2) +
+  geom_sf(data = clean_data_sf, col = "#F8D18D", size = .1, alpha = .2) +
+  
+  ggtitle("Map of detected cases within Fulton county")+
+  
+  theme(plot.margin = unit(c(2, 2, 2, 2), "mm"), 
+        panel.background = element_blank(), 
+        legend.background=element_blank(),
+        axis.line = element_blank(), 
+        axis.title = element_blank(), 
+        axis.ticks = element_blank(), 
+        axis.text = element_blank(), 
+        plot.title = element_text(size = 13, 
+                                  color = "#34495E", 
+                                  hjust = 0, 
+                                  vjust = 0)) +
+  ggsn::scalebar(data=vector, dist= 15, dist_unit = "km", 
+           transform=T, 
+           model="WGS84", 
+           border.size = .2, 
+           st.size = 2, 
+           height = .01, 
+           location= "bottomleft", 
+           anchor = c(x=-84.4, y =33.5 )
+           ) + 
+    
+    ggsn::north(data=vector, 
+          symbol = 14, 
+          scale= .08, 
+          location= "topleft")  
+  
+ 
+
+```
+</center>
+
+### Chloropleths maps 
+
+```{r AR per week and ZIP, include = F}
+
+#using clean_data, 1. calculate N cases per week and County, 2. We calculate the Attack rates per week and county 3. We subset AR tables in small and big regions because of the outliers. 4. We categorise the AR for mapping, 4. We spatial reference the AR tables using zip codes for mapping
+
+#1. Calculate N cases per weeks and ZIP codes, required for attack_rate() - join the pop of each county
+
+weekly_zip_cases <- clean_data %>% 
+  
+  filter(case_zip %in% pop_data$ZipCode) %>% #only keep cases that are included in the shapefile
+  
+  drop_na(pos_sampledt_FALSE) %>% #remove samples that do not have a valid date of confirmation
+  
+  mutate(month = format(pos_sampledt_FALSE, "%Y-%m")) %>% #create a month variable for later maps
+  
+  group_by(month, 
+           ISOweek = ISOweek::ISOweek(floor_date(pos_sampledt_FALSE, "weeks")),
+           
+           case_zip)  %>% 
+  
+  count() %>%
+  
+  ungroup() %>% 
+
+  #add pop of each ZIP
+left_join(., pop_data, by= c("case_zip" = "ZipCode")) %>% 
+
+#remove Zip code where pop is <0
+filter(Population !=0)
+
+# -----------------------------------------------
+
+#2. Calculate AR for each week and Zip
+weekly_zip_ar <- attack_rate(cases = weekly_zip_cases$n, 
+            population = weekly_zip_cases$Population, 
+            multiplier = 10000, 
+            mergeCI = T) %>% 
+  
+  bind_cols(select(weekly_zip_cases, ISOweek, case_zip, month)) %>% #add ISOweek - Zip variable -  month
+  
+    #set as first var
+    relocate(c(ISOweek, month, case_zip), 1) 
+
+# -----------------------------------------------------------------------
+#3. subset small regions 
+
+#see distribution of AR - massive outliers that dilute visualisations (AR > 300) - located in  THREE regions with SMALL populations
+hist(weekly_zip_ar$ar, breaks = 1000)
+filter(weekly_zip_ar, ar > 300) %>% count(case_zip, population)
+
+#create a subset using population size <1000
+weekly_zip_ar_small <- weekly_zip_ar %>% filter(population<1000)
+
+#remove them from the main dataset 
+weekly_zip_ar_big <- weekly_zip_ar %>% filter(!(case_zip %in% weekly_zip_ar_small$case_zip ))
+
+
+#----------------------------------------------------------------------
+#4. Categorisation of ARs
+
+## creates breaks for categories - main breaks and then breaks for small regions (outliers) -- not sure this is ideal but trying to get best nuances for visualisation
+
+breaks <- as.integer(c(0, find_breaks(max(weekly_zip_ar_big$ar, na.rm=T), breaks = 5, snap = 5)))
+
+breaks_small <- as.integer(c(0, find_breaks(max(weekly_zip_ar_small$ar, na.rm=T), breaks = 5, snap = 10)))
+
+#categorize AR - main
+weekly_zip_ar_big <- weekly_zip_ar_big %>% mutate(ar_cat = age_categories(ar, breaks))
+
+#categorize AR - small regions
+weekly_zip_ar_small <- weekly_zip_ar_small %>% mutate(ar_cat = age_categories(ar, breaks_small))
+
+# -----------------------------------------------------------------------
+#5. Geo-referencing the AR table using the geometry of shapefile - in vector
+
+#add geometry to AR per zip codes 
+weekly_zip_ar_sf_big <- left_join(weekly_zip_ar_big, select(vector, ZipCode, geometry), by = c("case_zip" = "ZipCode")) %>% 
+  
+  st_as_sf()
+
+weekly_zip_ar_sf_small <- left_join(weekly_zip_ar_small, select(vector, ZipCode, geometry), by = c("case_zip" = "ZipCode")) %>% 
+  
+  st_as_sf()
+```
+ 
+#### Peak of Outbreak
+<center>
+```{r chloropleth peak}
+#get peak of outbreak
+peak <- date2week(find_peak(inci), floor_day = T)
+
+#define palette 
+pal <- colorFactor(palette = c("#94d2bd", 
+                               "#ffe169", 
+                               "#edc531", 
+                               "#e85d04", 
+                               "#780000", 
+                               "#bb3e03"), 
+                    level = weekly_zip_ar_big$ar_cat, 
+                    ordered = T)
+
+
+#create Labels in HTML for hovering on map 
+weekly_zip_ar_sf_big$labels <- paste0(weekly_zip_ar_sf_big$ISOweek, "<br>ZIP: <b>", weekly_zip_ar_sf_big$case_zip, "<br>", "Attack Rate: </b>", round(digits = 2, weekly_zip_ar_sf_big$ar), " per 10 000<br> <b>Population:</b> ", weekly_zip_ar_sf_big$population) %>% lapply(htmltools::HTML)
+
+
+# map using leaflet 
+leaflet(data = filter(filter(weekly_zip_ar_sf_big), ISOweek == peak), 
+        
+        options = leafletOptions(dragging =F, 
+                                 minZoom = 9.5, 
+                                 maxZoom = 9.5, 
+                                 zoomControl = F)) %>% 
+  
+  addPolygons(fillColor = ~pal(ar_cat),
+              weight  = 0.4,
+              color = "black", 
+              highlightOptions = highlightOptions(weight = 4, 
+                                                  color = "red", 
+                                                  bringToFront = T, 
+                                                  opacity = .5), 
+              label = ~labels) %>% 
+  
+  addLegend(pal = pal, values = ~ar_cat, 
+            title = "Attack Rate<br><span style='font-size:10px;'>per 10 000") %>% 
+  
+  addControl(paste0(html = "<span style ='font-size:12px;color:#34495E;'>Chloropleth map of Fulton county at peak of the outbreak: <b>", peak, "</b></span><br><span style ='font-size:11px;color:#34495E;'>regions with more than 1000 habitants"))
+
+```
+</center>
+
+<hr>
+
+Below are mapped the smaller regions of Fulton county (<1000 habitants) which AR are really important (mean: `r round(digits = 2, mean(weekly_zip_ar_sf_small$ar))`) due to small size populations, mean: `r round(digits = 2, mean(weekly_zip_ar_sf_small$population))`. This was done to allow a more nuanced mapping of other bigger regions by removing outliers. 
+
+<hr>
+
+<center>
+```{r chloropleth peak small regions}
+
+#I do this graph otherwise these regions make the distribution of AR extremely righ skewed and visaulisation is really hard on main graph due to massive outliers
+
+#define palette 
+pal_small <- colorFactor(palette = c( 
+                               "#edc531", 
+                               "#e85d04", 
+                               "#dc2f02", 
+                               "#bb3e03"), 
+                    level = weekly_zip_ar_sf_small$ar_cat, 
+                    ordered = T)
+
+#create Labels in HTML for hovering on map 
+weekly_zip_ar_sf_small$labels <- paste0(weekly_zip_ar_sf_small$ISOweek, "<br>ZIP: <b>", weekly_zip_ar_sf_small$case_zip, "<br>", "Attack Rate: </b>", round(digits = 2, weekly_zip_ar_sf_small$ar), " per 10 000<br> <b>Population:</b> ", weekly_zip_ar_sf_small$population) %>% lapply(htmltools::HTML)
+
+
+# map using leaflet 
+leaflet(data = filter(filter(weekly_zip_ar_sf_small), ISOweek == peak), 
+        
+        options = leafletOptions(dragging =F, 
+                                 minZoom = 9.5, 
+                                 maxZoom = 9.5, 
+                                 zoomControl = F)) %>% 
+  
+  addPolygons(fillColor = ~pal_small(ar_cat),
+              weight  = 1.3,
+              color = "black", 
+              highlightOptions = highlightOptions(weight = 4, 
+                                                  color = "red", 
+                                                  bringToFront = T, 
+                                                  opacity = .5), 
+              label = ~labels) %>% 
+  
+  addLegend(pal = pal_small, values = ~ar_cat, 
+            title = "Attack Rate<br><span style='font-size:10px;'>per 10 000") %>% 
+  
+  addControl(paste0(html = "<span style ='font-size:12px;color:#34495E;'>Chloropleth map of Fulton county at peak of the outbreak: <b>", peak, "</b></span><br><span style ='font-size:11px;color:#34495E;'>regions with less than 1000 habitants"))
+
+```
+</center>
+
+At the peak of the outbreak: **`r peak`**, the region with the greatest Attack rate was **`r filter(filter(weekly_zip_ar, ISOweek == peak), ar == max(ar))$case_zip` ** with an Attack rate of `r filter(filter(weekly_zip_ar, ISOweek == peak), ar == max(ar))$ar` `r filter(filter(weekly_zip_ar, ISOweek == peak), ar == max(ar))$ci` per 10 000
+
+
+### Months and week
+
+Maps of big regions of Fulton county by Week of Outbreak. 
+
+```{r chloropleth for loop, dpi = 250}
+#create a function that filters data on month and then plot a chloropleth
+
+month_week_chloro <- function(data_ar, year_month){
+  
+  ggplot() +
+  
+  geom_sf(data = filter(data_ar, month == year_month), 
+          
+          aes(fill = ar_cat), 
+          alpha = .5, 
+          color = "black", 
+          size=.1) +
+  
+  scale_fill_manual(values = c("#94d2bd", 
+                               "#ffe169", 
+                               "#edc531", 
+                               "#e85d04", 
+                               "#780000", 
+                               "#bb3e03")) +
+  
+  ggtitle(year_month) +
+  
+  facet_wrap (~ISOweek, nrow = 1) +
+  
+  theme(panel.background = element_blank(), 
+          plot.title = element_text(face = "bold"),
+          axis.text = element_blank(), 
+          axis.ticks = element_blank(), 
+          strip.text = element_text(face="bold"), 
+          strip.background = element_rect(color="black", fill="white"), 
+          panel.border = element_blank(), 
+          axis.title= element_blank(), 
+          legend.key = element_blank(), 
+        plot.margin = unit(c(1,1,1,1), "cm" ) )
+  
+}
+
+#for loop the function to create all chloropleth subsetted by month
+for (time in(unique(weekly_zip_ar_sf_big$month))) {
+  
+print(month_week_chloro(weekly_zip_ar_sf_big, year_month = time) )
+  
+}
+```
