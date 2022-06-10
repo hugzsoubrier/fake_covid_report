@@ -20,43 +20,39 @@ knitr::opts_chunk$set(echo = FALSE,
 
 ```{r library loading}
 #spatial analysis 
-library(shiny)
 library(sf)
 library(ggsn)
 library(raster)
 library(leaflet)
 
 #epidemiological analysis 
-
 library(ISOweek)
-library(shinyWidgets)
-
 library(sitrep)
-library(skimr)
 library(epikit)
 library(incidence)
 library(linelist)
-library(magrittr)
-library(utils)
 library(lubridate)
-library(aweek)
-library(naniar)
-library(ggplot2)
-library(devtools)
-library(plotly)
-library(shinydashboard)
-library(shinyjs)
-library(janitor)
-library(lubridate)
-library(sunburstR)
-library(knitr)
+
+#visualisation
+library(highcharter)
 library(kableExtra)
+library(knitr)
+library(ggplot2)
+
+#data science
 library(rio)
 library(here)
+library(skimr)
+library(magrittr)
+library(utils)
+library(aweek)
+library(naniar)
+library(janitor)
 library(tidyselect)
 library(tidyverse)
-library(highcharter)
+
 ```
+
 ## **Introduction** 
 
 ```{r data loading & cleaning,}
@@ -1151,47 +1147,6 @@ weekly_zip_ar_sf_small <- left_join(weekly_zip_ar_small, select(vector, ZipCode,
   
   st_as_sf()
 ```
- 
- 
- 
- 
- 
- 
-```{r draft}
-
-clean_data %>% 
-  
-  filter(case_zip %in% pop_data$ZipCode) %>% 
-  
-  drop_na(pos_sampledt_FALSE) %>%
-  
-  mutate(month = format(pos_sampledt_FALSE, "%Y-%m")) %>% 
-  
-  group_by(month, 
-           ISOweek = ISOweek::ISOweek(floor_date(pos_sampledt_FALSE, "weeks", 
-                                                 week_start = getOption("lubridate.week.start", 1))), 
-           case_zip)  %>% 
-  
-  count() %>% 
-  
-  ungroup()
-
-```
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
  
 #### Peak of Outbreak
 <center>
