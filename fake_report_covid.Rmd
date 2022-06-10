@@ -4,6 +4,7 @@ author: "Hugo Soubrier"
 date: "09/06/2022"
 output: 
   html_document:
+    keep_md: true
     toc: true
     toc_float: true
     toc_depth: 5
