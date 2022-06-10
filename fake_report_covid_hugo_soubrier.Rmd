@@ -413,6 +413,8 @@ Amongst all cases, symptoms were distributed as follow:
 clean_data %>% 
   tab_linelist(sym_vars) %>% 
   
+  rename("%" = proportion) %>% 
+  
   select(-variable) %>% 
   
   #style kable
@@ -1250,10 +1252,8 @@ At the peak of the outbreak: **`r peak`**, the region with the greatest Attack r
 ### Months and week
 
 Maps of big regions of Fulton county by Week of Outbreak. 
-
 ```{r chloropleth for loop, dpi = 250}
 #create a function that filters data on month and then plot a chloropleth
-
 month_week_chloro <- function(data_ar, year_month){
   
   ggplot() +
@@ -1285,7 +1285,7 @@ month_week_chloro <- function(data_ar, year_month){
           panel.border = element_blank(), 
           axis.title= element_blank(), 
           legend.key = element_blank(), 
-        plot.margin = unit(c(1,1,1,1), "cm" ) )
+        plot.margin = unit(c(0,0,0,0), "cm" ) )
   
 }
 
